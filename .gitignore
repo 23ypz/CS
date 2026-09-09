@@ -1,4 +1,3 @@
-@'
 # Unity generated files
 [Ll]ibrary/
 [Tt]emp/
@@ -10,7 +9,7 @@
 [Mm]emoryCaptures/
 [Rr]ecordings/
 
-# IDE files
+# IDE and generated project files
 .vs/
 .vscode/
 *.csproj
@@ -22,7 +21,10 @@
 *.mdb
 *.opendb
 
+# Python cache
+server/__pycache__/
+*.pyc
+
 # Operating system files
 .DS_Store
 Thumbs.db
-'@ | Set-Content -Encoding utf8 .gitignore

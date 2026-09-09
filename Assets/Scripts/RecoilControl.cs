@@ -10,16 +10,32 @@ public class RecoilControl : MonoBehaviour
     public float returnSpeed = 5;
     private float targeRotation;
     private float currentRotation;
+    private Transform recoilTarget;
+    private Quaternion baseRotation;
 
-    // Update is called once per frame
-    void Update()
+    private void Awake()
     {
-        // �ָ�
+        Camera childCamera = GetComponentInChildren<Camera>(true);
+        if (childCamera != null)
+        {
+            recoilTarget = childCamera.transform;
+            baseRotation = recoilTarget.localRotation;
+        }
+        else
+        {
+            Debug.LogWarning("RecoilControl requires a child Camera.", this);
+            enabled = false;
+        }
+    }
+
+    private void LateUpdate()
+    {
+        // 恢复
         targeRotation = Mathf.Lerp(targeRotation, 0, returnSpeed * Time.deltaTime);
-        // ��ת
+        // 旋转
         currentRotation = Mathf.Lerp(currentRotation, targeRotation, speed * Time.deltaTime);
-        // Ӧ����ת
-        transform.localRotation = Quaternion.Euler(currentRotation, transform.localEulerAngles.y, 0);
+        // 后坐力只作用于摄像机，避免覆盖玩家 Rigidbody 的旋转
+        recoilTarget.localRotation = baseRotation * Quaternion.Euler(currentRotation, 0f, 0f);
 
     }
 

@@ -1,5 +1,3 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
 public class EnemyControl : MonoBehaviour
@@ -7,21 +5,23 @@ public class EnemyControl : MonoBehaviour
     public int hp = 10;
     public GameObject bombEffect;
 
-    // Start is called before the first frame update
-    void Start()
-    {
-        
-    }
+    private bool dead;
 
-    // Update is called once per frame
     public void Gethit(int damage)
     {
+        if (dead)
+            return;
+
         hp -= damage;
-        if(hp <= 0)
-        {
-            // ±¬Õ¨
+        if (hp > 0)
+            return;
+
+        dead = true;
+
+        if (bombEffect != null)
             Instantiate(bombEffect, transform.position, transform.rotation);
-            Destroy(gameObject);
-        }
+
+        // EnemyControl may be placed on a child hitbox; remove the whole monster.
+        Destroy(transform.root.gameObject);
     }
 }

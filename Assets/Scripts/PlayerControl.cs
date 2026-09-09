@@ -7,29 +7,28 @@ public class PlayerControl : MonoBehaviour
     private Rigidbody rb;
     private Animator ani;
 
-    // ÀŸ∂»
+    // ÈÄüÂ∫¶
     public float speed = 3f;
     public float jumpForce = 5;
-    // ¡È√Ù∂»
+    // ÁÅµÊïèÂ∫¶
     public float xScensitivity = 7;
     public float yScensitivity = 7;
 
-    private float xRotation = 0;
-    private Vector3 velocity;
-    private bool jump = false;
+    private float xRotation;
+    private Vector2 moveInput;
+    private float pendingYaw;
+    private bool jumpRequested;
 
     [HideInInspector]
     public bool highSpeed = false;
     [HideInInspector]
     public bool isAiming = false;
 
-    private float mouseX;
-
-    // Start is called before the first frame update
-    void Start()
+    private void Awake()
     {
         rb = GetComponent<Rigidbody>();
         ani = GetComponentInChildren<Animator>();
+        rb.interpolation = RigidbodyInterpolation.Interpolate;
         Cursor.lockState = CursorLockMode.Locked;
     }
 
@@ -37,10 +36,10 @@ public class PlayerControl : MonoBehaviour
     void Update()
     {
         Aim();
-        Mouse();
+        ReadLookInput();
         HighSpeed();
-        Move();
-        Jump();
+        ReadMoveInput();
+        jumpRequested |= Input.GetKeyDown(KeyCode.Space);
 
         //Debug.DrawRay(transform.position + Vector3.up * 0.2f,
         //    -Vector3.up * 0.4f, Color.red);
@@ -63,32 +62,24 @@ public class PlayerControl : MonoBehaviour
         }
     }
 
-    void Mouse()
+    void ReadLookInput()
     {
         float x = Input.GetAxis("Mouse X");
         float y = Input.GetAxis("Mouse Y");
 
-        // …œœ¬–˝◊™
+        // ‰∏ä‰∏ãËßÜËßíÂè™ËÆ∞ÂΩïËæìÂÖ•ÔºåÂú® LateUpdate Â∫îÁî®ÔºåÈÅøÂÖçË¢´ Animator Ë¶ÜÁõñ
         xRotation -= y * yScensitivity;
         xRotation = Mathf.Clamp(xRotation, -80, 80);
-        ani.transform.localRotation = Quaternion.Euler(xRotation, 0, 0);
-        // ◊Û”“–˝◊™
-        transform.Rotate(Vector3.up * x * xScensitivity);
+        // Â∑¶Âè≥ÊóãËΩ¨Âú® FixedUpdate ÈÄöËøá Rigidbody.MoveRotation Â∫îÁî®
+        pendingYaw += x * xScensitivity;
     }
 
-    void Move()
+    void ReadMoveInput()
     {
-        // ªÒ»°ÀÆ∆Ω ‰»Î -1 0 1
-        float horizontal = Input.GetAxis("Horizontal");
-        // ªÒ»°¥π÷± ‰»Î 
-        float vertical = Input.GetAxis("Vertical");
-        // ¥¥Ω®œÚ¡ø µ±«∞Ω«…´“∆∂Øµƒ∑ΩœÚ
-        Vector3 dir = (transform.forward * vertical + transform.right * horizontal).normalized;
-        // ÀŸ∂»
-        velocity = dir * speed;
-        velocity.y = rb.velocity.y;
-        // “∆∂Ø∂Øª≠
-        ani.SetFloat("Movement", dir.magnitude);
+        moveInput.x = Input.GetAxis("Horizontal");
+        moveInput.y = Input.GetAxis("Vertical");
+        moveInput = Vector2.ClampMagnitude(moveInput, 1f);
+        ani.SetFloat("Movement", moveInput.magnitude);
     }
 
     void HighSpeed()
@@ -107,29 +98,51 @@ public class PlayerControl : MonoBehaviour
         }
     }
 
-    void Jump()
-    {
-        if(Input.GetKeyDown(KeyCode.Space) && IsGround())
-        {
-            jump = true;
-        }
-    }
-
     public bool IsGround()
     {
         RaycastHit hit;
-        bool res = Physics.Raycast(transform.position + Vector3.up * 0.2f,
+        bool res = Physics.Raycast(rb.position + Vector3.up * 0.2f,
             -Vector3.up, out hit, 0.4f, LayerMask.GetMask("Ground"));
         return res;
     }
 
     private void FixedUpdate()
     {
-        if (jump)
+        Quaternion nextRotation = rb.rotation;
+        if (Mathf.Abs(pendingYaw) > 0.0001f)
         {
-            jump = false;
-            velocity.y = jumpForce;
+            nextRotation = rb.rotation * Quaternion.Euler(0f, pendingYaw, 0f);
+            rb.MoveRotation(nextRotation);
+            pendingYaw = 0f;
         }
-        rb.velocity = velocity;
+
+        // In multiplayer the network client predicts local movement and sends
+        // inputs to the authoritative Python server. The original Rigidbody
+        // movement below remains untouched for single-player mode.
+        NetworkClient network = NetworkClient.Active;
+        if (network != null && network.DrivePlayer(rb, moveInput, nextRotation.eulerAngles.y,
+            xRotation, jumpRequested, highSpeed))
+        {
+            jumpRequested = false;
+            return;
+        }
+
+        Vector3 direction = nextRotation * new Vector3(moveInput.x, 0f, moveInput.y);
+        if (direction.sqrMagnitude > 1f)
+            direction.Normalize();
+
+        Vector3 nextVelocity = direction * speed;
+        nextVelocity.y = rb.velocity.y;
+        if (jumpRequested && IsGround())
+            nextVelocity.y = jumpForce;
+
+        jumpRequested = false;
+        rb.velocity = nextVelocity;
+    }
+
+    private void LateUpdate()
+    {
+        if (ani != null)
+            ani.transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
     }
 }
