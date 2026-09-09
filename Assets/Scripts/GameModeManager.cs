@@ -12,7 +12,7 @@ using UnityEngine.UI;
 public class GameModeManager : MonoBehaviour
 {
     private static GameModeManager instance;
-    private enum ScreenState { ModeSelect, SinglePlayer, Multiplayer, Lobby }
+    private enum ScreenState { ModeSelect, SinglePlayer, Multiplayer, Lobby, Gameplay, Pause }
 
     [Header("Network defaults")]
     public string defaultServerAddress = "127.0.0.1";
@@ -40,6 +40,11 @@ public class GameModeManager : MonoBehaviour
     public static bool IsMenuVisible
     {
         get { return instance != null && instance.canvas != null && instance.canvas.enabled; }
+    }
+
+    public static bool IsGameplayPaused
+    {
+        get { return instance != null && instance.state == ScreenState.Pause; }
     }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -82,6 +87,16 @@ public class GameModeManager : MonoBehaviour
     {
         if (networkClient != null)
             networkClient.Tick();
+
+        if ((state == ScreenState.Gameplay || state == ScreenState.Pause) &&
+            Input.GetKeyDown(KeyCode.Escape))
+        {
+            if (state == ScreenState.Pause)
+                ResumeGame();
+            else
+                ShowPauseMenu();
+            return;
+        }
 
         // PlayerControl historically locks the cursor in Awake. Keep the menu
         // interaction state authoritative while any setup screen is visible.
@@ -250,6 +265,7 @@ public class GameModeManager : MonoBehaviour
             SetStatus("没有找到单人游戏管理器");
             return;
         }
+        state = ScreenState.Gameplay;
         HideMenu();
         monsterMode.StartSinglePlayer(Mathf.RoundToInt(monsterCountSlider.value), Mathf.RoundToInt(monsterHealthSlider.value));
     }
@@ -295,6 +311,7 @@ public class GameModeManager : MonoBehaviour
 
     private void StartNetworkGame()
     {
+        state = ScreenState.Gameplay;
         HideMenu();
         if (monsterMode == null)
             monsterMode = FindObjectOfType<MonsterModeManager>();
@@ -305,7 +322,74 @@ public class GameModeManager : MonoBehaviour
     private void DisconnectToMenu()
     {
         if (networkClient != null)
+        {
             networkClient.Disconnect();
+        
+            Destroy(networkClient);
+            networkClient = null;
+        }
+        if (monsterMode != null)
+            monsterMode.ReturnToMenu();
+        Time.timeScale = 0f;
+        ShowModeSelect();
+    }
+
+    private void ShowPauseMenu()
+    {
+        state = ScreenState.Pause;
+        if (networkClient != null)
+            networkClient.SetPaused(true);
+        if (monsterMode == null)
+            monsterMode = FindObjectOfType<MonsterModeManager>();
+        if (monsterMode != null)
+            monsterMode.SetGameplayEnabled(false);
+
+        Time.timeScale = 0f;
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+        canvas.enabled = true;
+        ClearContent();
+        AddText("游戏暂停", 38, new Vector2(0f, 120f), new Vector2(680f, 60f),
+            TextAnchor.MiddleCenter, Color.white);
+        AddText("当前玩家动作已暂停", 21, new Vector2(0f, 65f), new Vector2(680f, 36f),
+            TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        AddButton("继续游戏", new Vector2(0f, -20f), new Vector2(300f, 62f), ResumeGame,
+            new Color(0.18f, 0.58f, 0.42f));
+        AddButton("退出游戏", new Vector2(0f, -105f), new Vector2(300f, 62f), ExitCurrentRoom,
+            new Color(0.65f, 0.20f, 0.18f));
+    }
+
+    private void ResumeGame()
+    {
+        state = ScreenState.Gameplay;
+        Time.timeScale = 1f;
+        if (networkClient != null)
+            networkClient.SetPaused(false);
+        if (monsterMode != null)
+            monsterMode.SetGameplayEnabled(true);
+        if (canvas != null)
+            canvas.enabled = false;
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+    }
+
+    private void ExitCurrentRoom()
+    {
+        if (networkClient != null)
+        {
+            networkClient.SetPaused(false);
+            networkClient.Disconnect();
+            Destroy(networkClient);
+            networkClient = null;
+        }
+        if (monsterMode == null)
+            monsterMode = FindObjectOfType<MonsterModeManager>();
+        if (monsterMode != null)
+            monsterMode.ReturnToMenu();
+        state = ScreenState.ModeSelect;
+        Time.timeScale = 0f;
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
         ShowModeSelect();
     }
 

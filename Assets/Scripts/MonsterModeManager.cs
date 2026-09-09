@@ -31,6 +31,7 @@ public class MonsterModeManager : MonoBehaviour
     private bool playing;
     private bool finished;
     private bool controlledByGameModeManager;
+    private bool networkControlled;
 
     public bool IsPlaying { get { return playing; } }
 
@@ -94,6 +95,7 @@ public class MonsterModeManager : MonoBehaviour
 
     public void StartSinglePlayer(int count, int health)
     {
+        networkControlled = false;
         monsterCount = Mathf.Clamp(count, 1, 20);
         monsterHealth = Mathf.Clamp(health, 1, 100);
         StartMonsterMode();
@@ -106,6 +108,7 @@ public class MonsterModeManager : MonoBehaviour
 
     public void StartNetworkMode()
     {
+        networkControlled = true;
         playing = true;
         finished = false;
         Time.timeScale = 1f;
@@ -128,7 +131,7 @@ public class MonsterModeManager : MonoBehaviour
 
     private void Update()
     {
-        if (!playing || finished)
+        if (networkControlled || !playing || finished)
             return;
 
         int alive = CountAliveMonsters();
@@ -154,6 +157,7 @@ public class MonsterModeManager : MonoBehaviour
 
     private void StartMonsterMode()
     {
+        networkControlled = false;
         if (player == null || monsterPrefab == null)
         {
             Debug.LogError("Monster mode requires a Player-tagged object and an enemy template.", this);
@@ -206,6 +210,20 @@ public class MonsterModeManager : MonoBehaviour
             weaponControl.enabled = true;
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
+    }
+
+    public void ReturnToMenu()
+    {
+        for (int i = 0; i < monsters.Count; i++)
+        {
+            if (monsters[i] != null)
+                Destroy(monsters[i]);
+        }
+        monsters.Clear();
+        playing = false;
+        finished = false;
+        networkControlled = false;
+        SetGameplayEnabled(false);
     }
 
     private void ConfigureMonster(GameObject monster)

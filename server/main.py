@@ -19,6 +19,10 @@ TICK_RATE = 30
 SNAPSHOT_RATE = 20
 MAX_SPEED = 6.0
 GRAVITY = 9.81
+# The Unity client uploads an 81x81 collision map as one newline-delimited JSON
+# frame. It is larger than asyncio's default 64 KiB StreamReader limit. Keep a
+# finite cap so a malformed client cannot allocate unbounded memory.
+MAX_TCP_MESSAGE = 16 * 1024 * 1024
 
 
 @dataclass
@@ -60,7 +64,8 @@ class GameServer:
         self.next_monster_id = 1
 
     async def start(self):
-        tcp = await asyncio.start_server(self.handle_tcp, HOST, PORT)
+        tcp = await asyncio.start_server(
+            self.handle_tcp, HOST, PORT, limit=MAX_TCP_MESSAGE)
         loop = asyncio.get_running_loop()
         self.udp_transport, _ = await loop.create_datagram_endpoint(
             lambda: UdpProtocol(self), local_addr=(HOST, PORT))
@@ -72,7 +77,15 @@ class GameServer:
         player = None
         try:
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    # A line longer than the configured limit cannot be
+                    # recovered safely because its frame boundary is unknown.
+                    # Close only this client and keep the server loop alive.
+                    peer = writer.get_extra_info("peername")
+                    print(f"TCP 消息过长，已断开客户端 {peer}: {exc}")
+                    break
                 if not line:
                     break
                 try:
@@ -89,7 +102,10 @@ class GameServer:
                         await self.send(writer, {"type": "info", "text": "服务器已满"})
                         break
                     player = Player(self.next_id, clean(msg.get("name", "")) or f"玩家{self.next_id}",
-                                    writer, secrets.token_hex(12))
+                                    writer, secrets.token_hex(12),
+                                    x=float(msg.get("x", 0.0)),
+                                    y=float(msg.get("y", 0.0)),
+                                    z=float(msg.get("z", 0.0)))
                     self.next_id += 1
                     self.players[player.id] = player
                     await self.send(writer, {"type": "welcome", "id": player.id, "token": player.token})
@@ -116,13 +132,18 @@ class GameServer:
                     await self.handle_shoot(player, msg)
                 elif command == "quit":
                     break
-        except (ConnectionError, asyncio.IncompleteReadError):
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
             pass
         finally:
             if player is not None:
                 self.players.pop(player.id, None)
                 await self.broadcast_lobby()
                 print(f"玩家离开: {player.id} {player.name}")
+                if not self.players:
+                    self.started = False
+                    self.map_data = None
+                    self.monsters.clear()
+                    self.next_monster_id = 1
             writer.close()
             try:
                 await writer.wait_closed()
@@ -148,9 +169,13 @@ class GameServer:
         origin = next(iter(self.players.values()))
         for index in range(5):
             angle = index * 2.399963
-            radius = 18.0 + index * 2.0
-            monster = Monster(self.next_monster_id, origin.x + math.cos(angle) * radius,
-                              origin.y, origin.z + math.sin(angle) * radius)
+            monster_x = origin.x + math.cos(angle) * (18.0 + index * 2.0)
+            monster_z = origin.z + math.sin(angle) * (18.0 + index * 2.0)
+            spawn = self.find_nearest_walkable(monster_x, monster_z, origin.x, origin.z)
+            if spawn is None:
+                continue
+            monster_x, monster_z, monster_y = spawn
+            monster = Monster(self.next_monster_id, monster_x, monster_y, monster_z)
             self.next_monster_id += 1
             self.monsters[monster.id] = monster
 
@@ -225,9 +250,33 @@ class GameServer:
             distance = math.sqrt(dx * dx + dz * dz)
             if distance > 1.4:
                 step = min(2.5 * dt, distance)
-                monster.x += dx / distance * step
-                monster.z += dz / distance * step
-            monster.y = target.y
+                direction_x, direction_z = dx / distance, dz / distance
+                perpendicular_x, perpendicular_z = -direction_z, direction_x
+                candidates = [
+                    (direction_x, direction_z),
+                    (perpendicular_x, perpendicular_z),
+                    (-perpendicular_x, -perpendicular_z),
+                    (direction_x + perpendicular_x, direction_z + perpendicular_z),
+                    (direction_x - perpendicular_x, direction_z - perpendicular_z),
+                ]
+                best = None
+                best_distance = float("inf")
+                for candidate_x, candidate_z in candidates:
+                    length = math.sqrt(candidate_x * candidate_x + candidate_z * candidate_z) or 1.0
+                    next_x = monster.x + candidate_x / length * step
+                    next_z = monster.z + candidate_z / length * step
+                    if not self.can_move_segment(monster.x, monster.z, next_x, next_z,
+                                                 monster.y, radius=0.55):
+                        continue
+                    candidate_distance = (target.x - next_x) ** 2 + (target.z - next_z) ** 2
+                    if candidate_distance < best_distance:
+                        best_distance = candidate_distance
+                        best = (next_x, next_z)
+                if best is not None:
+                    monster.x, monster.z = best
+            ground = self.ground_height(monster.x, monster.z, monster.y)
+            if ground is not None:
+                monster.y = ground
 
     def bind_udp(self, player_id, token, address):
         player = self.players.get(player_id)
@@ -254,14 +303,25 @@ class GameServer:
             rad = math.radians(yaw)
             next_x = player.x + (math.cos(rad) * x + math.sin(rad) * z) * speed * dt
             next_z = player.z + (-math.sin(rad) * x + math.cos(rad) * z) * speed * dt
-            if self.can_move(next_x, next_z, player.y):
+            if self.can_move(next_x, next_z, player.y, radius=0.3):
                 player.x, player.z = next_x, next_z
-            if command.get("jump") and player.vy == 0.0:
+
+            current_ground = self.ground_height(player.x, player.z, player.y)
+            if current_ground is None:
+                current_ground = player.y
+            grounded = player.vy <= 0.0 and player.y <= current_ground + 0.15
+            wants_jump = bool(command.get("jump")) and grounded
+            if wants_jump:
                 player.vy = 5.0
-            player.vy = max(-30.0, player.vy - GRAVITY * dt)
-            player.y = max(0.0, player.y + player.vy * dt)
-            if player.y <= 0.0:
-                player.y = 0.0
+            if not grounded or wants_jump:
+                player.vy = max(-30.0, player.vy - GRAVITY * dt)
+                player.y += player.vy * dt
+
+            next_ground = self.ground_height(player.x, player.z, current_ground)
+            if next_ground is None:
+                next_ground = current_ground
+            if player.y <= next_ground:
+                player.y = next_ground
                 player.vy = 0.0
             player.yaw = yaw
             player.pitch = float(command.get("pitch", player.pitch))
@@ -272,10 +332,9 @@ class GameServer:
                 "yaw": player.yaw, "ack": player.seq
             }, separators=(",", ":")).encode(), player.address)
 
-    def can_move(self, x, z, current_y):
-        """Validate movement against the first client's compact map grid."""
+    def map_cell(self, x, z):
         if not self.map_data:
-            return True
+            return None
         try:
             width = int(self.map_data["width"])
             depth = int(self.map_data["depth"])
@@ -285,13 +344,59 @@ class GameServer:
             ix = math.floor((x - origin_x) / cell + 0.5)
             iz = math.floor((z - origin_z) / cell + 0.5)
             if ix < 0 or iz < 0 or ix >= width or iz >= depth:
-                return False
-            index = iz * width + ix
-            walkable = self.map_data.get("walkable", [])
-            heights = self.map_data.get("heights", [])
-            return bool(walkable[index]) and abs(float(heights[index]) - current_y) <= 1.0
+                return None
+            return iz * width + ix
         except (KeyError, TypeError, ValueError, IndexError):
+            return None
+
+    def ground_height(self, x, z, fallback=None):
+        index = self.map_cell(x, z)
+        if index is None:
+            return fallback
+        walkable = self.map_data.get("walkable", [])
+        heights = self.map_data.get("heights", [])
+        if index >= len(walkable) or index >= len(heights) or not walkable[index]:
+            return None
+        return float(heights[index])
+
+    def can_move(self, x, z, current_y, radius=0.0):
+        """Validate an actor footprint against the shared collision grid."""
+        if not self.map_data:
             return True
+        samples = [(x, z)]
+        if radius > 0.0:
+            samples.extend(((x + radius, z), (x - radius, z),
+                            (x, z + radius), (x, z - radius)))
+        for sample_x, sample_z in samples:
+            ground = self.ground_height(sample_x, sample_z, None)
+            if ground is None or abs(ground - current_y) > 1.0:
+                return False
+        return True
+
+    def can_move_segment(self, start_x, start_z, end_x, end_z, current_y, radius=0.0):
+        distance = math.sqrt((end_x - start_x) ** 2 + (end_z - start_z) ** 2)
+        samples = max(1, int(math.ceil(distance / 0.2)))
+        for step in range(1, samples + 1):
+            t = step / samples
+            x = start_x + (end_x - start_x) * t
+            z = start_z + (end_z - start_z) * t
+            if not self.can_move(x, z, current_y, radius):
+                return False
+        return True
+
+    def find_nearest_walkable(self, x, z, fallback_x, fallback_z):
+        for radius in range(0, 12):
+            for angle_index in range(16):
+                angle = angle_index * math.pi * 2.0 / 16.0
+                candidate_x = x + math.cos(angle) * radius
+                candidate_z = z + math.sin(angle) * radius
+                ground = self.ground_height(candidate_x, candidate_z, None)
+                if ground is not None and self.can_move(candidate_x, candidate_z, ground, radius=0.45):
+                    return candidate_x, candidate_z, ground
+        ground = self.ground_height(fallback_x, fallback_z, None)
+        if ground is not None:
+            return fallback_x, fallback_z, ground
+        return None
 
     def broadcast_snapshot(self):
         if not self.udp_transport:

@@ -77,7 +77,7 @@ public static class NetworkMap
                 for (int c = 0; c < n; c++)
                 {
                     Collider hit = overlaps[c];
-                    if (hit.transform.IsChildOf(player) || hit.GetComponentInParent<EnemyControl>() != null ||
+                    if (hit.transform == player || hit.transform.IsChildOf(player) || hit.GetComponentInParent<EnemyControl>() != null ||
                         hit.GetComponentInParent<MonsterAI>() != null || hit is TerrainCollider) continue;
                     if (hit.bounds.max.y > point.y + .3f) blocked = true;
                 }

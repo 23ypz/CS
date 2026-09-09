@@ -39,11 +39,23 @@ public class NetworkClient : MonoBehaviour
     private NetworkMapData map;
     private Vector3 predictedPosition;
     private float predictedVelocity;
-    private Vector3 renderCorrection;
+    private bool predictionInitialized;
+    private bool locallyPaused;
+    private float predictionClock;
     private float shootTimer;
+    private bool bodyConfigured;
+    private bool originalKinematic;
+    private bool originalUseGravity;
+    private RigidbodyConstraints originalConstraints;
+    private const float ServerTickDelta = 1f / 30f;
 
     public bool IsGameStarted { get { return gameStarted && mapReady; } }
     public int LocalId { get { return localId; } }
+
+    public void SetPaused(bool paused)
+    {
+        locallyPaused = paused;
+    }
 
     private void Awake()
     {
@@ -67,7 +79,13 @@ public class NetworkClient : MonoBehaviour
             udp = new UdpClient(0);
             udpThread = new Thread(ReadUdp) { IsBackground = true };
             udpThread.Start();
-            SendTcp(JsonUtility.ToJson(new NetMessage { type = "hello", name = Clean(playerName), version = 1 }));
+            localPlayerObject = GameObject.FindGameObjectWithTag("Player");
+            localPlayer = localPlayerObject != null ? localPlayerObject.transform : null;
+            Vector3 startPosition = localPlayer != null ? localPlayer.position : Vector3.zero;
+            SendTcp(JsonUtility.ToJson(new NetMessage {
+                type = "hello", name = Clean(playerName), version = 1,
+                x = startPosition.x, y = startPosition.y, z = startPosition.z
+            }));
             StatusChanged?.Invoke("已连接，等待服务器确认…");
         }
         catch (Exception ex)
@@ -86,8 +104,7 @@ public class NetworkClient : MonoBehaviour
             localPlayerObject = GameObject.FindGameObjectWithTag("Player");
             if (localPlayerObject != null) localPlayer = localPlayerObject.transform;
         }
-        renderCorrection = Vector3.Lerp(renderCorrection, Vector3.zero, 1f - Mathf.Exp(-10f * Time.unscaledDeltaTime));
-        if (IsGameStarted && localPlayer != null)
+        if (IsGameStarted && localPlayer != null && !locallyPaused)
         {
             shootTimer += Time.unscaledDeltaTime;
             WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
@@ -102,13 +119,26 @@ public class NetworkClient : MonoBehaviour
 
     public bool DrivePlayer(Rigidbody body, Vector2 move, float yaw, float pitch, bool jump, bool run)
     {
-        if (!IsGameStarted || body == null) return false;
-        if (predictedPosition == Vector3.zero) predictedPosition = body.position;
-        NetInput input = new NetInput { seq = ++inputSequence, x = move.x, z = move.y, yaw = yaw, pitch = pitch, jump = jump, run = run };
-        Vector3 before = predictedPosition;
-        map.Step(ref predictedPosition, ref predictedVelocity, input);
-        body.MovePosition(predictedPosition + renderCorrection);
+        if (!IsGameStarted || body == null || locallyPaused) return IsGameStarted;
+        ConfigureNetworkBody(body);
+        if (!predictionInitialized)
+        {
+            predictedPosition = body.position;
+            predictionInitialized = true;
+            predictionClock = ServerTickDelta;
+        }
         body.MoveRotation(Quaternion.Euler(0f, yaw, 0f));
+        predictionClock += Time.fixedDeltaTime;
+        if (predictionClock < ServerTickDelta)
+        {
+            body.MovePosition(predictedPosition);
+            return true;
+        }
+
+        predictionClock -= ServerTickDelta;
+        NetInput input = new NetInput { seq = ++inputSequence, x = move.x, z = move.y, yaw = yaw, pitch = pitch, jump = jump, run = run };
+        map.Step(ref predictedPosition, ref predictedVelocity, input);
+        body.MovePosition(predictedPosition);
         SendUdp(JsonUtility.ToJson(new NetMessage { type = "input", id = localId, token = sessionToken, tick = input.seq, inputs = new[] { input } }));
         return true;
     }
@@ -125,6 +155,11 @@ public class NetworkClient : MonoBehaviour
         connected = false;
         gameStarted = false;
         mapReady = false;
+        predictionInitialized = false;
+        locallyPaused = false;
+        predictionClock = 0f;
+        predictedVelocity = 0f;
+        RestoreNetworkBody();
         try { SendTcp(JsonUtility.ToJson(new NetMessage { type = "quit" })); } catch { }
         try { tcpStream?.Close(); } catch { }
         try { tcp?.Close(); } catch { }
@@ -225,8 +260,7 @@ public class NetworkClient : MonoBehaviour
             {
                 Vector3 serverPosition = new Vector3(entity.x, entity.y, entity.z);
                 float error = Vector3.Distance(predictedPosition, serverPosition);
-                if (error > 4f) { predictedPosition = serverPosition; renderCorrection = Vector3.zero; }
-                else renderCorrection += serverPosition - predictedPosition;
+                ReconcilePosition(serverPosition, error);
                 continue;
             }
             NetworkPlayerView view;
@@ -258,9 +292,21 @@ public class NetworkClient : MonoBehaviour
             {
                 GameObject monster = Instantiate(prefab, new Vector3(entity.x, entity.y, entity.z), Quaternion.identity);
                 monster.name = "NetworkMonster_" + entity.id;
-                MonsterAI ai = monster.GetComponent<MonsterAI>(); if (ai != null) ai.enabled = false;
-                EnemyControl health = monster.GetComponentInChildren<EnemyControl>(true); if (health != null) health.enabled = false;
+                MonsterAI[] aiComponents = monster.GetComponentsInChildren<MonsterAI>(true);
+                for (int c = 0; c < aiComponents.Length; c++)
+                    aiComponents[c].enabled = false;
+                EnemyControl[] healthComponents = monster.GetComponentsInChildren<EnemyControl>(true);
+                for (int c = 0; c < healthComponents.Length; c++)
+                    healthComponents[c].enabled = false;
+                Rigidbody monsterBody = monster.GetComponent<Rigidbody>();
+                if (monsterBody != null)
+                {
+                    monsterBody.isKinematic = true;
+                    monsterBody.useGravity = false;
+                    monsterBody.interpolation = RigidbodyInterpolation.Interpolate;
+                }
                 view = monster.AddComponent<NetworkPlayerView>();
+                monster.SetActive(true);
                 remoteMonsters[entity.id] = view;
             }
             view.SetTarget(new Vector3(entity.x, entity.y, entity.z), Quaternion.Euler(0f, entity.yaw, 0f));
@@ -279,8 +325,55 @@ public class NetworkClient : MonoBehaviour
     private void Reconcile(NetMessage message)
     {
         Vector3 server = new Vector3(message.x, message.y, message.z);
-        if (Vector3.Distance(predictedPosition, server) > 4f) predictedPosition = server;
-        else renderCorrection += server - predictedPosition;
+        if (!predictionInitialized)
+        {
+            predictedPosition = server;
+            predictionInitialized = true;
+            return;
+        }
+        ReconcilePosition(server, Vector3.Distance(predictedPosition, server));
+    }
+
+    private void ReconcilePosition(Vector3 serverPosition, float error)
+    {
+        // Ignore normal packet-timing error. Correct only meaningful drift so
+        // every UDP packet does not pull the Rigidbody back and forth.
+        if (error > 3f)
+            predictedPosition = serverPosition;
+        else if (error > 0.75f)
+            predictedPosition = Vector3.Lerp(predictedPosition, serverPosition, 0.12f);
+    }
+
+    private void ConfigureNetworkBody(Rigidbody body)
+    {
+        if (bodyConfigured)
+            return;
+        originalKinematic = body.isKinematic;
+        originalUseGravity = body.useGravity;
+        originalConstraints = body.constraints;
+        body.isKinematic = true;
+        body.useGravity = false;
+        body.interpolation = RigidbodyInterpolation.Interpolate;
+        body.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
+        body.velocity = Vector3.zero;
+        body.angularVelocity = Vector3.zero;
+        bodyConfigured = true;
+    }
+
+    private void RestoreNetworkBody()
+    {
+        if (!bodyConfigured || localPlayer == null)
+            return;
+        Rigidbody body = localPlayer.GetComponent<Rigidbody>();
+        if (body != null)
+        {
+            body.isKinematic = originalKinematic;
+            body.useGravity = originalUseGravity;
+            body.constraints = originalConstraints;
+            body.velocity = Vector3.zero;
+            body.angularVelocity = Vector3.zero;
+        }
+        bodyConfigured = false;
     }
 
     private NetworkPlayerView CreateRemotePlayer(int id, Vector3 position, float yaw)

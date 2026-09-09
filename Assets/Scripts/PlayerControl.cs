@@ -15,8 +15,8 @@ public class PlayerControl : MonoBehaviour
     public float yScensitivity = 7;
 
     private float xRotation;
+    private float yaw;
     private Vector2 moveInput;
-    private float pendingYaw;
     private bool jumpRequested;
 
     [HideInInspector]
@@ -29,12 +29,15 @@ public class PlayerControl : MonoBehaviour
         rb = GetComponent<Rigidbody>();
         ani = GetComponentInChildren<Animator>();
         rb.interpolation = RigidbodyInterpolation.Interpolate;
+        yaw = rb.rotation.eulerAngles.y;
         Cursor.lockState = CursorLockMode.Locked;
     }
 
     // Update is called once per frame
     void Update()
     {
+        if (GameModeManager.IsGameplayPaused)
+            return;
         Aim();
         ReadLookInput();
         HighSpeed();
@@ -64,14 +67,18 @@ public class PlayerControl : MonoBehaviour
 
     void ReadLookInput()
     {
+        // Mouse deltas are sampled directly once per rendered frame. Keeping
+        // yaw separate from the Rigidbody prevents interpolation/correction
+        // from feeding back into the next mouse update.
         float x = Input.GetAxis("Mouse X");
         float y = Input.GetAxis("Mouse Y");
 
         // 上下视角只记录输入，在 LateUpdate 应用，避免被 Animator 覆盖
         xRotation -= y * yScensitivity;
         xRotation = Mathf.Clamp(xRotation, -80, 80);
-        // 左右旋转在 FixedUpdate 通过 Rigidbody.MoveRotation 应用
-        pendingYaw += x * xScensitivity;
+        yaw += x * xScensitivity;
+        if (yaw > 360f || yaw < -360f)
+            yaw = Mathf.Repeat(yaw, 360f);
     }
 
     void ReadMoveInput()
@@ -108,13 +115,14 @@ public class PlayerControl : MonoBehaviour
 
     private void FixedUpdate()
     {
-        Quaternion nextRotation = rb.rotation;
-        if (Mathf.Abs(pendingYaw) > 0.0001f)
+        if (GameModeManager.IsGameplayPaused)
         {
-            nextRotation = rb.rotation * Quaternion.Euler(0f, pendingYaw, 0f);
-            rb.MoveRotation(nextRotation);
-            pendingYaw = 0f;
+            rb.velocity = Vector3.zero;
+            jumpRequested = false;
+            return;
         }
+
+        Quaternion nextRotation = Quaternion.Euler(0f, yaw, 0f);
 
         // In multiplayer the network client predicts local movement and sends
         // inputs to the authoritative Python server. The original Rigidbody
@@ -126,6 +134,8 @@ public class PlayerControl : MonoBehaviour
             jumpRequested = false;
             return;
         }
+
+        rb.MoveRotation(nextRotation);
 
         Vector3 direction = nextRotation * new Vector3(moveInput.x, 0f, moveInput.y);
         if (direction.sqrMagnitude > 1f)
