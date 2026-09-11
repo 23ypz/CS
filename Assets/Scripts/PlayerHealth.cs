@@ -35,12 +35,29 @@ public sealed class PlayerHealth : MonoBehaviour
     private RecoilControl recoil;
     private Collider playerCollider;
     private float rootToGroundOffset;
+    private bool serverAuthoritative;
+    private bool originalBodyKinematic;
+    private bool originalUseGravity;
+
+    private bool UsesServerAuthority
+    {
+        get
+        {
+            NetworkClient client = NetworkClient.Active;
+            return serverAuthoritative || (client != null && client.IsGameStarted);
+        }
+    }
 
     private void Awake()
     {
         maxHealth = Mathf.Max(1f, maxHealth);
         CurrentHealth = maxHealth;
         body = GetComponent<Rigidbody>();
+        if (body != null)
+        {
+            originalBodyKinematic = body.isKinematic;
+            originalUseGravity = body.useGravity;
+        }
         animator = GetComponentInChildren<Animator>(true);
         controller = GetComponent<PlayerControl>();
         weapon = GetComponent<WeaponControl>();
@@ -64,7 +81,7 @@ public sealed class PlayerHealth : MonoBehaviour
 
     public void TakeDamage(float amount)
     {
-        if (IsDead || amount <= 0f) return;
+        if (UsesServerAuthority || IsDead || amount <= 0f) return;
         CurrentHealth = Mathf.Max(0f, CurrentHealth - amount);
         if (CurrentHealth <= 0f) Die();
     }
@@ -72,17 +89,41 @@ public sealed class PlayerHealth : MonoBehaviour
     /// <summary>Apply the server-authoritative state used by multiplayer.</summary>
     public void ApplyAuthoritativeState(int health, int maximum, bool dead, float remaining)
     {
+        ApplyAuthoritativeState(health, maximum, dead, remaining, transform.position);
+    }
+
+    /// <summary>The supplied position is chosen by the server, including on respawn.</summary>
+    public void ApplyAuthoritativeState(int health, int maximum, bool dead, float remaining,
+        Vector3 authoritativePosition)
+    {
+        serverAuthoritative = true;
         maxHealth = Mathf.Max(1f, maximum);
         CurrentHealth = Mathf.Clamp(health, 0, Mathf.RoundToInt(maxHealth));
         if (dead)
         {
             if (!IsDead)
+            {
+                transform.position = authoritativePosition;
+                if (body != null) body.position = authoritativePosition;
                 Die();
+            }
             respawnRemaining = Mathf.Clamp(remaining, 0f, Mathf.Max(0.1f, respawnDuration));
             return;
         }
         if (IsDead)
-            Respawn();
+            RestoreAliveState(authoritativePosition, true, false);
+    }
+
+    /// <summary>Clear a previous life/session without choosing a new spawn position.</summary>
+    public void ResetForNewMatch()
+    {
+        NetworkClient client = NetworkClient.Active;
+        serverAuthoritative = client != null && client.IsGameStarted;
+        maxHealth = Mathf.Max(1f, maxHealth);
+        CurrentHealth = maxHealth;
+        RestoreAliveState(transform.position, serverAuthoritative, true);
+        // The mode manager controls whether input is enabled after this reset.
+        if (controller != null) controller.enabled = true;
     }
 
     private void Die()
@@ -93,21 +134,35 @@ public sealed class PlayerHealth : MonoBehaviour
         deathPosition = transform.position;
         if (body != null)
         {
-            body.velocity = Vector3.zero;
-            body.angularVelocity = Vector3.zero;
+            if (!body.isKinematic)
+            {
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
             body.isKinematic = true;
         }
-        if (weapon != null) weapon.enabled = false;
+        if (weapon != null)
+        {
+            weapon.CancelActions();
+            weapon.enabled = false;
+        }
         if (recoil != null) recoil.enabled = false;
         if (animator != null) animator.speed = 0f;
-        if (deathCamera != null) deathCamera.transform.position = deathCamera.transform.position;
+        if (deathCamera != null)
+        {
+            cameraLocalPosition = deathCamera.transform.localPosition;
+            cameraLocalRotation = deathCamera.transform.localRotation;
+        }
     }
 
     private void Update()
     {
         if (!IsDead) return;
         transform.position = deathPosition;
-        respawnRemaining -= Time.unscaledDeltaTime;
+        // Local pause stops a local life timer. Multiplayer can display its
+        // remaining time while paused, but only a server snapshot revives it.
+        float deltaTime = UsesServerAuthority ? Time.unscaledDeltaTime : Time.deltaTime;
+        respawnRemaining = Mathf.Max(0f, respawnRemaining - deltaTime);
         if (deathCamera != null)
         {
             float t = RespawnProgress;
@@ -117,7 +172,7 @@ public sealed class PlayerHealth : MonoBehaviour
             deathCamera.transform.localRotation = cameraLocalRotation *
                 Quaternion.Euler(72f * t, 0f, 0f);
         }
-        if (respawnRemaining <= 0f) Respawn();
+        if (respawnRemaining <= 0f && !UsesServerAuthority) Respawn();
     }
 
     private void Respawn()
@@ -126,20 +181,32 @@ public sealed class PlayerHealth : MonoBehaviour
         if (!TryFindRespawnPosition(deathPosition, out respawnPosition))
             respawnPosition = deathPosition;
 
-        IsDead = false;
-        // A respawn is always a fresh life, even if the last server/local
-        // update arrived with a stale zero-health value.
         CurrentHealth = maxHealth;
+        RestoreAliveState(respawnPosition, false, true);
+    }
+
+    private void RestoreAliveState(Vector3 position, bool network, bool resetAmmo)
+    {
+        IsDead = false;
         respawnRemaining = 0f;
-        transform.position = respawnPosition;
+        transform.position = position;
         if (body != null)
         {
-            body.isKinematic = false;
-            body.position = respawnPosition;
-            body.velocity = Vector3.zero;
-            body.angularVelocity = Vector3.zero;
+            body.isKinematic = network || originalBodyKinematic;
+            body.useGravity = network ? false : originalUseGravity;
+            body.position = position;
+            if (!body.isKinematic)
+            {
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
         }
-        if (weapon != null) weapon.enabled = true;
+        if (weapon != null)
+        {
+            if (resetAmmo) weapon.ResetAmmo();
+            // A server respawn can arrive while the pause/menu UI is open.
+            weapon.enabled = !GameModeManager.IsGameplayPaused && !GameModeManager.IsMenuVisible;
+        }
         if (recoil != null) recoil.enabled = true;
         if (animator != null) animator.speed = 1f;
         if (deathCamera != null)

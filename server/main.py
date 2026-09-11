@@ -43,6 +43,12 @@ MONSTER_ATTACK_RANGE = 2.2
 PLAYER_RESPAWN_SECONDS = 2.0
 TOTAL_WAVES = 3
 WAVE_INTERVAL_TICKS = TICK_RATE * 20
+MAGAZINE_CAPACITY = 50
+RESERVE_CAPACITY = 200
+RELOAD_SECONDS = 1.5
+RESUPPLY_SECONDS = 2.0
+# Match the existing CityNew Player's serialized bulletInterval (600 RPM).
+SHOT_INTERVAL_SECONDS = 0.1
 
 
 @dataclass
@@ -69,6 +75,13 @@ class Player:
     spawn_x: float = 0.0
     spawn_y: float = 0.0
     spawn_z: float = 0.0
+    magazine: int = MAGAZINE_CAPACITY
+    reserve_ammo: int = RESERVE_CAPACITY
+    ammo_action: str = ""
+    ammo_action_started: float = 0.0
+    next_shot_at: float = 0.0
+    weapon_ack: int = 0
+    life: int = 0
 
 
 @dataclass
@@ -158,7 +171,8 @@ class GameServer:
                     player.spawn_x, player.spawn_y, player.spawn_z = player.x, player.y, player.z
                     self.next_id += 1
                     self.players[player.id] = player
-                    await self.send(writer, {"type": "welcome", "id": player.id, "token": player.token})
+                    await self.send(writer, {"type": "welcome", "version": 3,
+                                             "id": player.id, "token": player.token})
                     await self.broadcast_lobby()
                     print(f"玩家加入: {player.id} {player.name}")
                     continue
@@ -206,6 +220,8 @@ class GameServer:
                                 await self.start_game()
                 elif command == "shoot":
                     await self.handle_shoot(player, msg)
+                elif command == "ammo_action":
+                    self.handle_ammo_action(player, msg)
                 elif command == "quit":
                     break
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
@@ -256,6 +272,7 @@ class GameServer:
             player.dead = False
             player.respawn_at = 0.0
             player.spawn_x, player.spawn_y, player.spawn_z = player.x, player.y, player.z
+            self.reset_player_ammo(player)
         self.started = True
         self.current_wave = 0
         self.next_wave_tick = self.tick
@@ -336,12 +353,42 @@ class GameServer:
                                 key=lambda item: (-getattr(item, "score", 0), item.id))]
 
     async def handle_shoot(self, shooter, message):
-        if not self.started or shooter.id not in self.players or shooter.dead:
+        if not self.accept_weapon_command(shooter, message):
             return
-        ox, oy, oz = float(message.get("x", shooter.x)), float(message.get("y", shooter.y)), float(message.get("z", shooter.z))
-        dx, dy, dz = float(message.get("dx", 0.0)), float(message.get("dy", 0.0)), float(message.get("dz", 1.0))
-        length = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        now = time.monotonic()
+        self.update_player_ammo(shooter, now)
+        if shooter.ammo_action:
+            return
+        # Absorb at most one tick of packet jitter, but preserve the weapon's
+        # cadence. Using only arrival-to-arrival deltas dropped normal shots
+        # arriving a millisecond early and made counts disagree with effects.
+        if now + 1.0 / TICK_RATE + 1e-6 < shooter.next_shot_at:
+            return
+        if shooter.magazine <= 0:
+            self.start_ammo_action(shooter, "reload", now)
+            return
+        try:
+            ox, oy, oz = (float(message.get("x", shooter.x)),
+                          float(message.get("y", shooter.y)),
+                          float(message.get("z", shooter.z)))
+            dx, dy, dz = (float(message.get("dx", 0.0)),
+                          float(message.get("dy", 0.0)),
+                          float(message.get("dz", 1.0)))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not all(math.isfinite(value) for value in (ox, oy, oz, dx, dy, dz)):
+            return
+        # Keep the muzzle close to the authoritative player position.
+        if (ox - shooter.x) ** 2 + (oy - shooter.y) ** 2 + (oz - shooter.z) ** 2 > 9.0:
+            ox, oy, oz = shooter.x, shooter.y + 0.8, shooter.z
+        length = math.hypot(dx, dy, dz)
+        if not math.isfinite(length) or length < 1e-6:
+            return
         dx, dy, dz = dx / length, dy / length, dz / length
+        shooter.magazine -= 1
+        shooter.next_shot_at = max(now, shooter.next_shot_at) + SHOT_INTERVAL_SECONDS
+        if shooter.magazine == 0:
+            self.start_ammo_action(shooter, "reload", now)
         hit = None
         best = 1e9
         for monster in self.monsters.values():
@@ -351,6 +398,9 @@ class GameServer:
                 continue
             distance_sq = vx * vx + vy * vy + vz * vz - projection * projection
             if distance_sq <= 1.0 and projection < best:
+                if self.map_data and not self.can_shoot_segment(
+                        shooter.x, shooter.z, monster.x, monster.z):
+                    continue
                 hit, best = monster, projection
         if hit is not None:
             # Apply the same small horizontal impulse used by the local
@@ -380,6 +430,86 @@ class GameServer:
                     "scores": self.score_snapshot()
                 })
 
+    @staticmethod
+    def reset_player_ammo(player):
+        player.magazine = MAGAZINE_CAPACITY
+        player.reserve_ammo = RESERVE_CAPACITY
+        player.ammo_action = ""
+        player.ammo_action_started = 0.0
+        player.next_shot_at = 0.0
+        # Commands queued before death must not consume the new life's ammo.
+        player.life += 1
+
+    def accept_weapon_command(self, player, message):
+        if not self.started or player.id not in self.players:
+            return False
+        sequence = message.get("weaponSeq")
+        life = message.get("life")
+        if (type(sequence) is not int or type(life) is not int or
+                sequence <= player.weapon_ack or life != player.life):
+            return False
+        player.weapon_ack = sequence
+        return not player.dead
+
+    def start_ammo_action(self, player, action, now=None):
+        if now is None:
+            now = time.monotonic()
+        if player.dead:
+            return
+        if action == "reload":
+            if player.ammo_action:
+                return
+            if player.magazine >= MAGAZINE_CAPACITY or player.reserve_ammo <= 0:
+                return
+        elif action == "resupply":
+            if player.ammo_action == "resupply":
+                return
+            if (player.magazine >= MAGAZINE_CAPACITY and
+                    player.reserve_ammo >= RESERVE_CAPACITY):
+                return
+        else:
+            return
+        player.ammo_action = action
+        player.ammo_action_started = now
+
+    def handle_ammo_action(self, player, message):
+        if not self.accept_weapon_command(player, message):
+            return
+        action = message.get("action", "")
+        now = time.monotonic()
+        self.update_player_ammo(player, now)
+        if action == "reload":
+            self.start_ammo_action(player, "reload", now)
+        elif action == "resupply_start":
+            self.start_ammo_action(player, "resupply", now)
+        elif action == "resupply_cancel" and player.ammo_action == "resupply":
+            player.ammo_action = ""
+            player.ammo_action_started = 0.0
+
+    @staticmethod
+    def update_player_ammo(player, now=None):
+        if now is None:
+            now = time.monotonic()
+        if player.dead:
+            player.ammo_action = ""
+            player.ammo_action_started = 0.0
+            return
+        if not player.ammo_action:
+            return
+        duration = (RELOAD_SECONDS if player.ammo_action == "reload"
+                    else RESUPPLY_SECONDS)
+        if now - player.ammo_action_started < duration:
+            return
+        if player.ammo_action == "reload":
+            amount = min(MAGAZINE_CAPACITY - player.magazine, player.reserve_ammo)
+            player.magazine += amount
+            player.reserve_ammo -= amount
+        else:
+            player.magazine = MAGAZINE_CAPACITY
+            player.reserve_ammo = RESERVE_CAPACITY
+        player.ammo_action = ""
+        player.ammo_action_started = 0.0
+
     async def send(self, writer, message):
         try:
             writer.write((json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
@@ -405,6 +535,9 @@ class GameServer:
         if not self.players:
             return
         dt = 1.0 / TICK_RATE
+        now = time.monotonic()
+        for player in self.players.values():
+            self.update_player_ammo(player, now)
         self._update_respawns()
         self._advance_waves()
         alive_players = [p for p in self.players.values() if not p.dead]
@@ -642,6 +775,7 @@ class GameServer:
             player.hp = player.max_hp
             player.dead = False
             player.respawn_at = 0.0
+            self.reset_player_ammo(player)
 
     def find_random_respawn(self, player):
         """Choose a different walkable point near the player's start point."""
@@ -693,6 +827,8 @@ class GameServer:
                 player.hp = max(0, player.hp - monster.attack_damage)
                 if player.hp <= 0:
                     player.dead = True
+                    player.ammo_action = ""
+                    player.ammo_action_started = 0.0
                     player.respawn_at = time.monotonic() + PLAYER_RESPAWN_SECONDS
                     player.vy = 0.0
 
@@ -807,28 +943,92 @@ class GameServer:
                 return False
         return True
 
+    def can_shoot_segment(self, start_x, start_z, end_x, end_z):
+        """Check projectile line of sight without applying walking-height rules.
+
+        ``can_move_segment`` is intentionally strict for actor navigation: it
+        rejects a segment when the floor height changes or when a footprint
+        sample leaves the uploaded grid. Those rules incorrectly rejected
+        visible targets on ramps and at the edge of the 81x81 capture. A
+        projectile only needs blocked cells between the muzzle and target; the
+        first and last cells are deliberately excluded because they contain
+        the shooter/monster colliders themselves.
+        """
+        if not self.map_data:
+            return True
+        distance = math.hypot(end_x - start_x, end_z - start_z)
+        samples = max(1, int(math.ceil(distance / 0.2)))
+        walkable = self.map_data.get("walkable", [])
+        for step in range(1, samples):
+            t = step / samples
+            x = start_x + (end_x - start_x) * t
+            z = start_z + (end_z - start_z) * t
+            index = self.map_cell(x, z)
+            # The collision capture is finite. Do not turn its outer boundary
+            # into an invisible wall for a target standing at the edge.
+            if index is None or index >= len(walkable):
+                continue
+            if not walkable[index]:
+                return False
+        return True
+
     def find_nearest_walkable(self, x, z, fallback_x, fallback_z):
-        for radius in range(0, 12):
+        # Never fall back to the player position: that used to place a monster
+        # inside the player or a wall when all nearby samples were blocked.
+        for radius in range(0, 18):
             for angle_index in range(16):
                 angle = angle_index * math.pi * 2.0 / 16.0
                 candidate_x = x + math.cos(angle) * radius
                 candidate_z = z + math.sin(angle) * radius
                 ground = self.ground_height(candidate_x, candidate_z, None)
-                if ground is not None and self.can_move(candidate_x, candidate_z, ground, radius=0.45):
+                if ground is not None and self.can_spawn_at(
+                        candidate_x, candidate_z, ground, fallback_x, fallback_z):
                     return candidate_x, candidate_z, ground
-        ground = self.ground_height(fallback_x, fallback_z, None)
-        if ground is not None:
-            return fallback_x, fallback_z, ground
         return None
+
+    def can_spawn_at(self, x, z, ground, player_x, player_z):
+        """Require a full monster footprint and separation from all actors."""
+        if (x - player_x) ** 2 + (z - player_z) ** 2 < 25.0:
+            return False
+        # Check cardinal and diagonal footprint samples. Four samples alone
+        # allow a monster to start in a diagonal wall corner and remain stuck.
+        radius = 0.62
+        samples = [(x, z), (x + radius, z), (x - radius, z),
+                   (x, z + radius), (x, z - radius)]
+        diagonal = radius * 0.70710678
+        samples.extend(((x + diagonal, z + diagonal),
+                        (x + diagonal, z - diagonal),
+                        (x - diagonal, z + diagonal),
+                        (x - diagonal, z - diagonal)))
+        for sample_x, sample_z in samples:
+            sample_ground = self.ground_height(sample_x, sample_z, None)
+            if sample_ground is None or abs(sample_ground - ground) > 1.0:
+                return False
+        for player in self.players.values():
+            if ((x - player.x) ** 2 + (z - player.z) ** 2 < 16.0):
+                return False
+        for monster in self.monsters.values():
+            if ((x - monster.x) ** 2 + (z - monster.z) ** 2 < 4.84):
+                return False
+        return True
 
     def broadcast_snapshot(self):
         if not self.udp_transport:
             return
+        now = time.monotonic()
         players = [{
             "id": p.id, "name": p.name, "x": p.x, "y": p.y, "z": p.z,
             "yaw": p.yaw, "pitch": p.pitch, "ack": p.seq,
             "hp": p.hp, "maxHp": p.max_hp, "dead": p.dead,
-            "respawn": max(0.0, p.respawn_at - time.monotonic()) if p.dead else 0.0
+            "respawn": max(0.0, p.respawn_at - time.monotonic()) if p.dead else 0.0,
+            "ammo": p.magazine, "reserve": p.reserve_ammo,
+            "reloading": p.ammo_action == "reload",
+            "resupplying": p.ammo_action == "resupply",
+            "weaponState": True, "life": p.life, "weaponAck": p.weapon_ack,
+            "shotInterval": SHOT_INTERVAL_SECONDS,
+            "ammoRemaining": (max(0.0, (RELOAD_SECONDS if p.ammo_action == "reload"
+                                       else RESUPPLY_SECONDS) - (now - p.ammo_action_started))
+                              if p.ammo_action else 0.0)
         } for p in self.players.values()]
         monsters = [{"id": m.id, "x": m.x, "y": m.y, "z": m.z, "hp": m.hp}
                     for m in self.monsters.values()]

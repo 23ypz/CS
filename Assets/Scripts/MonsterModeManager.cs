@@ -28,6 +28,7 @@ public class MonsterModeManager : MonoBehaviour
     private GameObject sceneEnemyTemplate;
     private RuntimeAnimatorController templateAnimatorController;
     private readonly List<GameObject> monsters = new List<GameObject>();
+    private readonly Collider[] spawnOverlapBuffer = new Collider[32];
     private bool playing;
     private bool finished;
     private bool controlledByGameModeManager;
@@ -120,6 +121,7 @@ public class MonsterModeManager : MonoBehaviour
     public void StartNetworkMode()
     {
         networkControlled = true;
+        ResetPlayerForNewMatch();
         waveSequence = null;
         playing = true;
         finished = false;
@@ -187,6 +189,7 @@ public class MonsterModeManager : MonoBehaviour
         monsterCount = Mathf.Clamp(monsterCount, 1, 20);
         monsterHealth = Mathf.Clamp(monsterHealth, 1, 100);
         ClearMonsters();
+        ResetPlayerForNewMatch();
         finished = false;
         waveSequence = new MonsterWaveSequence(monsterCount, monsterHealth, monsterSpeed);
         MonsterWaveSequence.Stats firstWave;
@@ -258,7 +261,23 @@ public class MonsterModeManager : MonoBehaviour
         playing = false;
         finished = false;
         networkControlled = false;
+        ResetPlayerForNewMatch();
         SetGameplayEnabled(false);
+    }
+
+    private void ResetPlayerForNewMatch()
+    {
+        if (player == null)
+            player = FindPlayer();
+        if (player == null)
+            return;
+        playerControl = player.GetComponent<PlayerControl>();
+        weaponControl = player.GetComponent<WeaponControl>();
+        PlayerHealth health = player.GetComponent<PlayerHealth>();
+        if (health != null)
+            health.ResetForNewMatch();
+        else if (weaponControl != null)
+            weaponControl.ResetAmmo();
     }
 
     private void ConfigureMonster(GameObject monster, MonsterWaveSequence.Stats stats)
@@ -311,7 +330,11 @@ public class MonsterModeManager : MonoBehaviour
     {
         // Try several nearby points. This avoids spawning outside the terrain or
         // on a position where the raycast has no valid ground hit.
-        for (int attempt = 0; attempt < 12; attempt++)
+        // A point can have a valid ground ray while its monster body is inside
+        // a wall, especially at the outer edge of the city. Try a generous,
+        // deterministic sample set and validate the complete footprint before
+        // accepting the point.
+        for (int attempt = 0; attempt < 48; attempt++)
         {
             float angle = (index * 137.5f + attempt * 29f + Random.Range(-20f, 20f)) * Mathf.Deg2Rad;
             Vector3 direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
@@ -322,12 +345,62 @@ public class MonsterModeManager : MonoBehaviour
             if (TryGetGroundHeight(position, out groundY))
             {
                 position.y = groundY;
-                return true;
+                if (IsSpawnPositionClear(position))
+                    return true;
             }
         }
 
         position = Vector3.zero;
         return false;
+    }
+
+    private bool IsSpawnPositionClear(Vector3 position)
+    {
+        if (player != null && Vector2.Distance(
+                new Vector2(position.x, position.z),
+                new Vector2(player.position.x, player.position.z)) < 5f)
+            return false;
+
+        for (int i = 0; i < monsters.Count; i++)
+        {
+            GameObject other = monsters[i];
+            if (other == null) continue;
+            Vector3 delta = other.transform.position - position;
+            delta.y = 0f;
+            if (delta.sqrMagnitude < 2.2f * 2.2f)
+                return false;
+        }
+
+        // Use a conservative capsule even before the prefab's runtime
+        // collider is attached. Ignore the floor and the inactive template;
+        // every other overlap is a wall, prop, player, or active actor.
+        int count = Physics.OverlapCapsuleNonAlloc(
+            position + Vector3.up * 0.12f,
+            position + Vector3.up * 1.7f,
+            0.68f, spawnOverlapBuffer, Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
+        if (count >= spawnOverlapBuffer.Length)
+            return false;
+        int groundLayer = LayerMask.NameToLayer("Ground");
+        for (int i = 0; i < count; i++)
+        {
+            Collider hit = spawnOverlapBuffer[i];
+            if (hit == null || hit.transform == player || hit.transform.IsChildOf(player))
+                continue;
+            if (hit is TerrainCollider || hit.gameObject.layer == groundLayer)
+                continue;
+            // Some city floor meshes are not assigned to the Ground layer.
+            // Their thin collider sits below the capsule; do not mistake it
+            // for a wall and reject every otherwise valid spawn point.
+            if (hit.bounds.max.y <= position.y + 0.2f)
+                continue;
+            if (sceneEnemyTemplate != null &&
+                (hit.transform == sceneEnemyTemplate.transform ||
+                 hit.transform.IsChildOf(sceneEnemyTemplate.transform)))
+                continue;
+            return false;
+        }
+        return true;
     }
 
     private bool TryGetGroundHeight(Vector3 position, out float groundY)

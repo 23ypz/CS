@@ -62,7 +62,8 @@ public class NetworkClient : MonoBehaviour
     private bool predictionInitialized;
     private bool locallyPaused;
     private float predictionClock;
-    private float shootTimer;
+    private int weaponSequence;
+    private int weaponLife;
     private bool bodyConfigured;
     private bool originalKinematic;
     private bool originalUseGravity;
@@ -74,6 +75,11 @@ public class NetworkClient : MonoBehaviour
 
     public void SetPaused(bool paused)
     {
+        if (paused && !locallyPaused && localPlayer != null)
+        {
+            WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
+            if (weapon != null) weapon.CancelResupplyForPause();
+        }
         locallyPaused = paused;
     }
 
@@ -103,7 +109,7 @@ public class NetworkClient : MonoBehaviour
             localPlayer = localPlayerObject != null ? localPlayerObject.transform : null;
             Vector3 startPosition = localPlayer != null ? localPlayer.position : Vector3.zero;
             SendTcp(JsonUtility.ToJson(new NetMessage {
-                type = "hello", name = Clean(playerName), version = 1,
+                type = "hello", name = Clean(playerName), version = 3,
                 x = startPosition.x, y = startPosition.y, z = startPosition.z
             }));
             StatusChanged?.Invoke("已连接，等待服务器确认…");
@@ -118,29 +124,17 @@ public class NetworkClient : MonoBehaviour
     public void Tick()
     {
         while (incoming.TryDequeue(out string message))
-            HandleMessage(message);
+        {
+            if (connected) HandleMessage(message);
+        }
         if (localPlayer == null)
         {
             localPlayerObject = GameObject.FindGameObjectWithTag("Player");
             if (localPlayerObject != null) localPlayer = localPlayerObject.transform;
         }
-        if (IsGameStarted && localPlayer != null && !locallyPaused)
-        {
-            shootTimer += Time.unscaledDeltaTime;
-            WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
-            PlayerControl playerController = localPlayer.GetComponent<PlayerControl>();
-            PlayerHealth playerHealth = localPlayer.GetComponent<PlayerHealth>();
-            bool weaponAllowed = playerController == null || !playerController.highSpeed;
-            bool alive = playerHealth == null || !playerHealth.IsDead;
-            bool ammoAvailable = weapon != null && weapon.CurrentMagazine > 0 && !weapon.IsBusy;
-            if (weapon != null && weaponAllowed && alive && ammoAvailable && Input.GetMouseButton(0) &&
-                shootTimer >= weapon.bulletInterval)
-            {
-                shootTimer = 0f;
-                if (weapon.FirePoint != null)
-                    SendShoot(weapon.FirePoint.transform.position, weapon.FirePoint.transform.forward);
-            }
-        }
+        // WeaponControl owns input and the single fire timer. Never sample
+        // the mouse again here: independent timers used to send different
+        // shots from the ones for which the weapon played effects/spent ammo.
     }
 
     public bool DrivePlayer(Rigidbody body, Vector2 move, float yaw, float pitch, bool jump, bool run)
@@ -197,13 +191,30 @@ public class NetworkClient : MonoBehaviour
 
     // Keep older parameterless host-start call sites source-compatible.
     public void SendStart() { SendStart(MonsterCount, MonsterHealth); }
-    public void SendShoot(Vector3 origin, Vector3 direction)
+    public bool SendShoot(Vector3 origin, Vector3 direction)
     {
-        SendTcp(JsonUtility.ToJson(new NetMessage { type = "shoot", x = origin.x, y = origin.y, z = origin.z, dx = direction.x, dy = direction.y, dz = direction.z }));
+        if (!connected || !IsGameStarted || locallyPaused || weaponLife <= 0) return false;
+        SendTcp(JsonUtility.ToJson(new NetMessage {
+            type = "shoot", weaponSeq = ++weaponSequence, life = weaponLife,
+            x = origin.x, y = origin.y, z = origin.z,
+            dx = direction.x, dy = direction.y, dz = direction.z
+        }));
+        return true;
+    }
+
+    public int SendAmmoAction(string action)
+    {
+        if (!connected || !IsGameStarted || locallyPaused || weaponLife <= 0) return 0;
+        int sequence = ++weaponSequence;
+        SendTcp(JsonUtility.ToJson(new NetMessage {
+            type = "ammo_action", action = action, weaponSeq = sequence, life = weaponLife
+        }));
+        return sequence;
     }
 
     public void Disconnect()
     {
+        bool wasConnected = connected || gameStarted;
         CurrentWave = TotalWaves = NextWave = 0;
         WavesComplete = false;
         waveRemainingAtSnapshot = 0f;
@@ -216,12 +227,24 @@ public class NetworkClient : MonoBehaviour
         predictedVelocity = 0f;
         lastSnapshotTick = -1;
         lastScoreTick = -1;
+        weaponSequence = weaponLife = 0;
         RestoreNetworkBody();
+        if (wasConnected && localPlayer != null)
+        {
+            PlayerHealth health = localPlayer.GetComponent<PlayerHealth>();
+            if (health != null) health.ResetForNewMatch();
+            else
+            {
+                WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
+                if (weapon != null) weapon.ResetAmmo();
+            }
+        }
         try { SendTcp(JsonUtility.ToJson(new NetMessage { type = "quit" })); } catch { }
         try { tcpStream?.Close(); } catch { }
         try { tcp?.Close(); } catch { }
         try { udp?.Close(); } catch { }
         tcp = null; tcpStream = null; udp = null;
+        while (incoming.TryDequeue(out string ignored)) { }
         foreach (NetworkPlayerView view in remotePlayers.Values)
             if (view != null) Destroy(view.gameObject);
         remotePlayers.Clear();
@@ -274,6 +297,12 @@ public class NetworkClient : MonoBehaviour
         switch (message.type)
         {
             case "welcome":
+                if (message.version < 3)
+                {
+                    StatusChanged?.Invoke("服务器版本过旧，请重启更新后的 server/main.py 再连接");
+                    Disconnect();
+                    break;
+                }
                 localId = message.id;
                 sessionToken = message.token;
                 SendUdp(JsonUtility.ToJson(new NetMessage { type = "bind", id = localId, token = sessionToken }));
@@ -290,11 +319,19 @@ public class NetworkClient : MonoBehaviour
                 StatusChanged?.Invoke(mapReady ? "地图同步完成，等待开始…" : "地图同步失败");
                 break;
             case "start":
+                if (gameStarted) break;
+                if (localPlayer != null)
+                    ConfigureNetworkBody(localPlayer.GetComponent<Rigidbody>());
                 gameStarted = true;
                 ReadWaveState(message);
                 MonsterCount = Mathf.Clamp(message.count > 0 ? message.count : MonsterCount, 1, 20);
                 MonsterHealth = Mathf.Clamp(message.health > 0 ? message.health : MonsterHealth, 1, 100);
                 GameStarted?.Invoke(MonsterCount, MonsterHealth);
+                if (localPlayer != null)
+                {
+                    WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
+                    if (weapon != null) weapon.ResetAmmo();
+                }
                 break;
             case "snapshot":
                 HandleSnapshot(message);
@@ -318,6 +355,7 @@ public class NetworkClient : MonoBehaviour
 
     private void HandleSnapshot(NetMessage message)
     {
+        if (!connected || !IsGameStarted) return;
         // UDP can arrive out of order.  Ignoring stale snapshots prevents a
         // killed monster from being recreated briefly (and exploding twice)
         // and stops leaderboard scores from rolling backwards.
@@ -352,12 +390,22 @@ public class NetworkClient : MonoBehaviour
                 int maxHp = entity.maxHp > 0 ? entity.maxHp : 100;
                 PlayerHealth localHealth = localPlayer != null
                     ? localPlayer.GetComponent<PlayerHealth>() : null;
+                WeaponControl localWeapon = localPlayer != null
+                    ? localPlayer.GetComponent<WeaponControl>() : null;
                 bool wasDead = localHealth != null && localHealth.IsDead;
                 PlayerHealthChanged?.Invoke(entity.hp, maxHp, entity.dead,
                     Mathf.Max(0f, entity.respawn));
                 if (localHealth != null)
                     localHealth.ApplyAuthoritativeState(entity.hp, maxHp,
-                        entity.dead, Mathf.Max(0f, entity.respawn));
+                        entity.dead, Mathf.Max(0f, entity.respawn),
+                        new Vector3(entity.x, entity.y, entity.z));
+                // Restore life/camera first; then apply the matching weapon
+                // state so no local respawn reset can overwrite this packet.
+                if (entity.weaponState && entity.life >= weaponLife)
+                {
+                    weaponLife = entity.life;
+                    if (localWeapon != null) localWeapon.ApplyAuthoritativeAmmo(entity);
+                }
                 Vector3 serverPosition = new Vector3(entity.x, entity.y, entity.z);
                 // The server chooses the multiplayer respawn point. Override
                 // the local random visual position as soon as that snapshot
@@ -372,6 +420,7 @@ public class NetworkClient : MonoBehaviour
                     if (localBody != null)
                         localBody.position = serverPosition;
                     predictedPosition = serverPosition;
+                    predictedVelocity = 0f;
                     predictionInitialized = true;
                 }
                 float error = Vector3.Distance(predictedPosition, serverPosition);
@@ -532,7 +581,7 @@ public class NetworkClient : MonoBehaviour
 
     private void ConfigureNetworkBody(Rigidbody body)
     {
-        if (bodyConfigured)
+        if (bodyConfigured || body == null)
             return;
         originalKinematic = body.isKinematic;
         originalUseGravity = body.useGravity;
