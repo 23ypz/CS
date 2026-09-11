@@ -75,8 +75,7 @@ public static class WeaponControlRegression
             Weapon.BulletPre = new GameObject();
             Weapon.FirePre = new GameObject();
             Weapon.fireSound = new AudioClip();
-            // Match CityNew's serialized weapon setting; do not rely on the
-            // source field initializer, which older versions left at 0.3s.
+            // 使用 CityNew 的序列化射速，不依赖旧字段默认值。
             Weapon.bulletInterval = inspectorShotInterval;
             Call(Weapon, "Awake");
             Call(Weapon, "Start");
@@ -393,8 +392,7 @@ public static class WeaponControlRegression
 
     private static void OnlineCadenceUsesServerInterval()
     {
-        // Exercise both directions: a slow Inspector override must not slow
-        // the server rate, and a fast override must not bypass that rate.
+        // 本地覆盖值不能加速或减慢服务器射速。
         foreach (float inspectorInterval in new[] { 0.5f, 0.01f })
         {
             Fixture fixture = new Fixture(true, inspectorShotInterval: inspectorInterval);
@@ -405,8 +403,7 @@ public static class WeaponControlRegression
             fixture.Step(0.05f, false, true);
             Equal(2, fixture.Client.ShootCalls, "Inspector cannot lengthen server cooldown");
 
-            // A non-default value proves this uses the snapshot field, not
-            // merely a new hard-coded 0.1s constant in the online branch.
+            // 非默认间隔验证快照字段生效，而非硬编码 0.1 秒。
             fixture.Weapon.ApplyAuthoritativeAmmo(State(48, 200, shotInterval: 0.2f));
             fixture.Step(0.1f, false, true);
             Equal(2, fixture.Client.ShootCalls, "updated server cooldown is respected");
@@ -442,9 +439,8 @@ public static class WeaponControlRegression
         foreach (bool online in new[] { false, true })
         {
             Fixture fixture = new Fixture(online);
-            fixture.Step(0f, false, true); // t=0 shot
-            // 59 frames reaches t<1.0. The epsilon in production's cadence
-            // comparison must not create an eleventh shot at a float boundary.
+            fixture.Step(0f, false, true); // t=0 时开火
+            // 59 帧仍未到 1 秒，浮点容差不能多产生第 11 发。
             for (int frame = 0; frame < 59; frame++)
                 fixture.Step(1f / 60f, false, true);
             Equal(10, fixture.Recoil.FireCount, "60Hz local cadence");

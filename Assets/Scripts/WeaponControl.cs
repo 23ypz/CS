@@ -37,12 +37,13 @@ public class WeaponControl : MonoBehaviour
         get { return NetworkAuthoritative ? networkShotInterval : Mathf.Max(0.02f, bulletInterval); }
     }
 
-    /// <summary>Restore the initial loadout for a new life or a new match.</summary>
+    /* 新生命或新对局恢复初始弹药。 */
     public void ResetAmmo()
     {
         CancelActions();
         CurrentMagazine = magazineCapacity;
         ReserveAmmo = reserveCapacity;
+        // 清除上一生命的网络确认与射击冷却。
         networkShotInterval = 0.1f;
         timer = ShotInterval;
         networkAmmoReady = false;
@@ -52,6 +53,7 @@ public class WeaponControl : MonoBehaviour
 
     public void CancelActions()
     {
+        // 取消动作、按键状态和进度显示。
         IsReloading = false;
         IsResupplying = false;
         actionTimer = 0f;
@@ -62,12 +64,11 @@ public class WeaponControl : MonoBehaviour
         ActionRemaining = 0f;
     }
 
-    /// <summary>Counts are never predicted online, including timed refills.</summary>
+    /* 联机弹药数量不在客户端预测。 */
     public void ApplyAuthoritativeAmmo(NetEntity state)
     {
         if (!state.weaponState || state.life < networkLife) return;
-        // Multiplayer cadence comes from the same server rule that accepts
-        // shots, not a second hard-coded delay or a local inspector override.
+        // 联机射速由服务器快照决定，不使用本地覆盖值。
         if (state.shotInterval > 0f && !float.IsNaN(state.shotInterval) && !float.IsInfinity(state.shotInterval))
             networkShotInterval = Mathf.Clamp(state.shotInterval, 0.02f, 2f);
         if (state.life != networkLife)
@@ -78,14 +79,13 @@ public class WeaponControl : MonoBehaviour
         }
         networkAmmoReady = true;
         networkLife = state.life;
-        // The server owns these rules; inspector overrides remain single-player only.
+        // 换弹规则由服务器控制，Inspector 值仅用于单机。
         CurrentMagazine = Mathf.Clamp(state.ammo, 0, 50);
         ReserveAmmo = Mathf.Clamp(state.reserve, 0, 200);
-        // A snapshot sent before our R command may contain the old action.
-        // Apply its counts, but don't rewind the action we have just requested.
+        // 旧快照仍可到达；更新数量但不回退刚发起的动作。
         if (state.weaponAck < pendingActionSequence) return;
         pendingActionSequence = 0;
-        bool sameAction = IsReloading == state.reloading && IsResupplying == state.resupplying;
+        bool same = IsReloading == state.reloading && IsResupplying == state.resupplying;
         IsReloading = state.reloading;
         IsResupplying = state.resupplying;
         if (!IsBusy)
@@ -95,17 +95,17 @@ public class WeaponControl : MonoBehaviour
         }
         float duration = IsReloading ? 1.5f : 2f;
         float elapsed = Mathf.Clamp(duration - state.ammoRemaining, 0f, duration);
-        actionTimer = sameAction ? Mathf.Max(actionTimer, elapsed) : elapsed;
+        actionTimer = same ? Mathf.Max(actionTimer, elapsed) : elapsed;
         UpdateNetworkProgress(0f);
     }
 
-    private float timer, actionTimer, rHoldTimer;
+    private float timer, actionTimer, rHoldTimer; // 射击冷却、动作计时、R 键按住时长。
     private bool rHolding;
-    private bool resupplyHeldLatch;
-    private bool networkAmmoReady;
+    private bool resupplyHeldLatch; // 一次长按完成后锁定，避免重复补给。
+    private bool networkAmmoReady; // 首份权威快照到达后才能联机开火。
     private float networkShotInterval = 0.1f;
-    private int pendingActionSequence;
-    private int networkLife;
+    private int pendingActionSequence; // 等待服务器确认的动作序号。
+    private int networkLife; // 当前生命代次，过滤死亡前的旧状态。
     private PlayerControl pc;
     private PlayerHealth health;
     private RecoilControl rc;
@@ -123,17 +123,19 @@ public class WeaponControl : MonoBehaviour
         pc = GetComponent<PlayerControl>();
         health = GetComponent<PlayerHealth>();
         rc = GetComponent<RecoilControl>();
-        // Preserve and use the existing Player AudioSource.
+        // 保留并使用 Player 原有 AudioSource。
         AS = GetComponent<AudioSource>();
     }
 
     private void Update()
     {
+        // 死亡和菜单状态不消费输入，也不推进本地动作。
         if (health != null && health.IsDead) return;
         if (GameModeManager.IsGameplayPaused || GameModeManager.IsMenuVisible) return;
         bool online = NetworkAuthoritative;
         float dt = online ? Time.unscaledDeltaTime : Time.deltaTime;
         timer += dt;
+        // 联机仅预测进度，单机直接结算弹药。
         if (online)
         {
             if (!networkAmmoReady) return;
@@ -151,6 +153,7 @@ public class WeaponControl : MonoBehaviour
 
     private void HandleNetworkReloadKey(float dt)
     {
+        // 按下只发一次开始指令，持续按住累计时长。
         if (Input.GetKey(KeyCode.R))
         {
             if (!rHolding)
@@ -158,8 +161,7 @@ public class WeaponControl : MonoBehaviour
                 rHolding = true;
                 rHoldTimer = 0f;
                 resupplyHeldLatch = false;
-                // A just-fired shot may not yet be in the latest snapshot.
-                // Let the server decide even when the displayed count is full.
+                // 最新快照可能尚未包含刚发出的子弹，交由服务器裁决。
                 RequestNetworkAction("resupply_start", false, true);
             }
             rHoldTimer = Mathf.Min(2f, rHoldTimer + dt);
@@ -167,15 +169,13 @@ public class WeaponControl : MonoBehaviour
             return;
         }
         if (!rHolding) return;
-        // Cancel first, then reload. Previously the order was reversed, so
-        // the server discarded the reload while it still saw a resupply.
+        // 先取消补给再换弹，避免服务器仍处于补给状态。
         if (!resupplyHeldLatch)
         {
             RequestNetworkAction("resupply_cancel", false, false);
             RequestNetworkAction("reload", true, false);
         }
-        // A full two-second hold is already the operation; don't start a
-        // second countdown or locally change the ammo at this boundary.
+        // 2 秒长按本身就是补给，不再启动第二次倒计时。
         rHolding = false;
         rHoldTimer = 0f;
         resupplyHeldLatch = false;
@@ -184,9 +184,10 @@ public class WeaponControl : MonoBehaviour
     private void RequestNetworkAction(string action, bool reload, bool resupply)
     {
         NetworkClient client = NetworkClient.Active;
-        int sequence = client != null ? client.SendAmmoAction(action) : 0;
-        if (sequence <= 0) return;
-        pendingActionSequence = sequence;
+        int seq = client != null ? client.SendAmmoAction(action) : 0;
+        if (seq <= 0) return;
+        pendingActionSequence = seq;
+        // 只更新等待中的动作显示，数量等待权威快照。
         IsReloading = reload;
         IsResupplying = resupply;
         actionTimer = ActionProgress = 0f;
@@ -200,7 +201,7 @@ public class WeaponControl : MonoBehaviour
         actionTimer = Mathf.Min(duration, actionTimer + dt);
         ActionProgress = Mathf.Clamp01(actionTimer / duration);
         ActionRemaining = Mathf.Max(0f, duration - actionTimer);
-        // Keep the action pending until a snapshot confirms completion.
+        // 等待快照确认动作完成。
     }
 
     public void CancelResupplyForPause()
@@ -214,12 +215,12 @@ public class WeaponControl : MonoBehaviour
 
     private void HandleReloadKey(float dt)
     {
+        // 单机长按直接结算补给，短按在松开时进入换弹。
         if (Input.GetKey(KeyCode.R))
         {
             if (!rHolding)
             {
-                // A two-second hold may replace an automatic reload in both
-                // modes; it must not wait for another 1.5s operation first.
+                // 2 秒补给可替代自动换弹，不再等待额外的 1.5 秒动作。
                 CancelActions();
                 rHolding = true;
             }
@@ -231,8 +232,7 @@ public class WeaponControl : MonoBehaviour
                 ActionRemaining = Mathf.Max(0f, resupplyDuration - rHoldTimer);
                 if (rHoldTimer >= resupplyDuration)
                 {
-                    // The hold itself is the two-second operation. Do not
-                    // start a second timed action after the hold completes.
+                    // 长按已完成补给，不再启动第二次计时。
                     CurrentMagazine = magazineCapacity;
                     ReserveAmmo = reserveCapacity;
                     ActionProgress = 1f;
@@ -251,6 +251,7 @@ public class WeaponControl : MonoBehaviour
 
     private void UpdateTimedAction(float dt)
     {
+        // 先推进进度，计时结束后再一次性转移弹药。
         if (!IsBusy) return;
         actionTimer += dt;
         float duration = IsResupplying ? resupplyDuration : reloadDuration;
@@ -259,8 +260,7 @@ public class WeaponControl : MonoBehaviour
         if (actionTimer < duration) return;
         if (IsResupplying)
         {
-            // A completed two-second resupply restores the complete initial
-            // loadout, including the rounds currently in the front magazine.
+            // 补给完成后恢复整套初始弹药。
             if (!NetworkAuthoritative)
             {
                 CurrentMagazine = magazineCapacity;
@@ -272,6 +272,7 @@ public class WeaponControl : MonoBehaviour
         {
             if (!NetworkAuthoritative)
             {
+                // 仅从备用弹药扣除弹夹实际缺少的数量。
                 int amount = Mathf.Min(magazineCapacity - CurrentMagazine, ReserveAmmo);
                 CurrentMagazine += amount;
                 ReserveAmmo -= amount;
@@ -283,6 +284,7 @@ public class WeaponControl : MonoBehaviour
 
     private void StartReload()
     {
+        // 联机发送动作请求，单机检查弹夹和备用量后计时。
         if (NetworkAuthoritative)
         {
             if (!IsBusy && CurrentMagazine < 50 && ReserveAmmo > 0)
@@ -295,6 +297,7 @@ public class WeaponControl : MonoBehaviour
 
     private void TryFire()
     {
+        // 空弹夹转入换弹；联机发送请求，单机扣弹。
         if (CurrentMagazine <= 0) { StartReload(); return; }
         if (FirePoint == null || BulletPre == null) return;
         if (NetworkAuthoritative)
@@ -303,6 +306,7 @@ public class WeaponControl : MonoBehaviour
         }
         else
             CurrentMagazine--;
+        // 确认发射后统一播放后坐力、子弹、音效和枪口效果。
         timer = 0f;
         if (rc != null) rc.Fire();
         Instantiate(BulletPre, FirePoint.transform.position, FirePoint.transform.rotation);

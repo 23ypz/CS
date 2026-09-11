@@ -5,38 +5,37 @@ public class MonsterAI : MonoBehaviour
     public float moveSpeed = 2.5f;
     public float stopDistance = 1.5f;
 
-    [Header("Attack")]
-    [Tooltip("Players within this horizontal radius take damage once per second.")]
-    // Match the authoritative multiplayer range so single-player and
-    // multiplayer have the same close-range threat distance.
+    [Header("攻击")]
+    [Tooltip("水平攻击范围，范围内玩家每秒受伤一次。")]
+    /* 与多人服务器保持相同攻击范围。 */
     public float attackRadius = 2.2f;
     public float attackDamage = 10f;
     public float attackInterval = 1f;
 
-    [Tooltip("How quickly projectile knockback fades, in metres per second squared.")]
+    [Tooltip("击退速度每秒的衰减量。")]
     public float knockbackDamping = 10f;
 
-    [Tooltip("Maximum accumulated horizontal knockback speed.")]
+    [Tooltip("水平击退速度的叠加上限。")]
     public float maxKnockbackSpeed = 5f;
 
-    [Header("Obstacle avoidance")]
-    [Tooltip("Radius used to probe walls in front of the monster.")]
+    [Header("绕障")]
+    [Tooltip("探测前方墙体的半径。")]
     [Min(0.1f)]
     public float obstacleRadius = 0.45f;
-    [Tooltip("Height of the horizontal wall probe above the monster's feet.")]
+    [Tooltip("墙体探测起点距脚底的高度。")]
     [Min(0.1f)]
     public float obstacleProbeHeight = 0.7f;
-    [Tooltip("Extra clearance kept between the monster and a wall.")]
+    [Tooltip("怪物与墙体之间额外保留的间距。")]
     [Min(0f)]
     public float obstacleSkin = 0.05f;
 
-    [Tooltip("Local grid spacing used when a wall blocks direct pursuit.")]
+    [Tooltip("绕障寻路网格的间距。")]
     [Min(0.25f)]
     public float navigationCellSize = 0.8f;
-    [Tooltip("Number of cells searched in each direction around the monster.")]
+    [Tooltip("局部寻路网格的边长，单位为格。")]
     [Range(5, 61)]
     public int navigationGridSize = 31;
-    [Tooltip("Seconds between local grid path rebuilds.")]
+    [Tooltip("重新寻路的间隔秒数。")]
     [Min(0.05f)]
     public float navigationRepathInterval = 0.25f;
 
@@ -46,15 +45,13 @@ public class MonsterAI : MonoBehaviour
     private float groundOffset;
     private Vector3 knockbackVelocity;
     private float nextAttackTime;
-    private Vector3 cachedPathDirection;
-    private float nextPathRebuildTime;
+    private Vector3 cachedPathDirection; // 缓存绕障方向
+    private float nextPathRebuildTime; // 下次路径重建时间
     private Vector3 cachedPathTarget;
     private readonly RaycastHit[] castHits = new RaycastHit[16];
     private readonly RaycastHit[] groundHits = new RaycastHit[8];
     private readonly Collider[] overlapHits = new Collider[16];
-    // The monster can start on a large height difference (for example when
-    // spawning on a city ramp), so a short ray can miss the terrain and leave
-    // the old Y coordinate unchanged. Keep the ray deliberately generous.
+    /* 城市斜坡高度差较大，使用足够长的地面射线。 */
     private const float GroundRayHeight = 50f;
     private const float GroundRayDistance = 100f;
 
@@ -70,11 +67,7 @@ public class MonsterAI : MonoBehaviour
         groundOffset = offset;
     }
 
-    /// <summary>
-    /// Applies a horizontal projectile impulse.  Monsters use kinematic bodies
-    /// for deterministic navigation, so the impulse is integrated here instead
-    /// of calling Rigidbody.AddForce on the kinematic body.
-    /// </summary>
+    /* 施加水平子弹冲量；运动由运动学刚体确定性积分。 */
     public void ApplyKnockback(Vector3 impulse)
     {
         impulse.y = 0f;
@@ -108,15 +101,13 @@ public class MonsterAI : MonoBehaviour
         Vector3 nextPosition = body.position;
         Quaternion facing = body.rotation;
 
-        // Blend the impulse with the normal pursuit movement.  This gives a
-        // visible brief retreat while keeping the existing obstacle-aware AI.
+        /* 阶段一：合并击退和追踪移动，保留可见后退效果。 */
         Vector3 knockbackStep = Vector3.zero;
         float pursuitScale = 1f;
         if (knockbackVelocity.sqrMagnitude > 0.0001f)
         {
             knockbackStep = knockbackVelocity * Time.fixedDeltaTime;
-            // Give the impulse a clear visual retreat instead of letting the
-            // regular chase speed cancel it on the same physics step.
+            /* 减弱追踪速度，避免同一帧抵消击退。 */
             pursuitScale = knockbackVelocity.magnitude > 0.25f ? 0.35f : 1f;
             float damping = Mathf.Max(0f, knockbackDamping) * Time.fixedDeltaTime;
             knockbackVelocity = Vector3.MoveTowards(knockbackVelocity, Vector3.zero, damping);
@@ -140,20 +131,13 @@ public class MonsterAI : MonoBehaviour
             nextPosition += direction * moveSpeed * Time.fixedDeltaTime * pursuitScale;
         }
 
-        // Monsters previously moved directly to the target and could therefore
-        // pass through buildings and other colliders. Resolve the complete
-        // horizontal step with a sphere probe and, when blocked, choose a clear
-        // tangent direction around the obstacle. This keeps the existing
-        // deterministic kinematic movement while providing lightweight
-        // obstacle avoidance without requiring a baked NavMesh.
+        /* 阶段二：用球形检测解析水平步进，阻挡时选择切向路径。 */
         Vector3 horizontalStep = nextPosition - body.position;
         horizontalStep.y = 0f;
         horizontalStep = GetCollisionFreeStep(body.position, horizontalStep);
         nextPosition = body.position + horizontalStep;
 
-        // Snap every physics step, including while stopped near the player.
-        // This prevents a monster from retaining an invalid Y after walking
-        // over a slope or after a temporary raycast miss.
+        /* 阶段三：校正地面高度，避免斜坡或射线漏检导致高度失效。 */
         if (TryGetGroundY(nextPosition, out float groundY))
             nextPosition.y = groundY + groundOffset;
 
@@ -175,18 +159,11 @@ public class MonsterAI : MonoBehaviour
         if (!HasObstacle(probeOrigin, desiredDirection, distance + obstacleSkin, probeRadius))
             return desiredStep;
 
-        // Directional steering is not sufficient at concave wall corners: it
-        // can keep selecting the same blocked tangent forever. Build a small
-        // local A* path through free cells and use its first waypoint. This is
-        // deliberately local and rebuilt periodically, so it works without a
-        // baked NavMesh and remains deterministic for each monster.
+        /* 凹角处单纯转向可能反复卡住，因此构建局部 A* 路径。 */
         if (TryGetGridPathDirection(from, distance, out Vector3 gridDirection))
             return gridDirection * distance;
 
-        // There is deliberately no reduced-radius escape or normal push here:
-        // those shortcuts can move a monster through a wall at a corner. If a
-        // complete-radius grid path is unavailable, remain still until the
-        // next rebuild rather than violating collision clearance.
+        /* 无完整路径时保持静止，避免缩小半径穿墙。 */
         return Vector3.zero;
     }
 
@@ -219,8 +196,7 @@ public class MonsterAI : MonoBehaviour
         float probeRadius = Mathf.Max(0.1f, obstacleRadius);
         if (HasObstacle(probeOrigin, direction, stepDistance + obstacleSkin, probeRadius))
         {
-            // Invalidate immediately; the next physics tick will rebuild from
-            // the new position rather than repeatedly pushing into a corner.
+            /* 立即失效，下个物理帧从新位置重建路径。 */
             cachedPathDirection = Vector3.zero;
             return false;
         }
@@ -252,14 +228,13 @@ public class MonsterAI : MonoBehaviour
         }
         int start = center + center * size;
         blocked[start] = false;
-        Vector3 targetOffset = targetFlat - from;
-        int goalX = Mathf.Clamp(Mathf.RoundToInt(targetOffset.x / cell) + center, 0, size - 1);
-        int goalZ = Mathf.Clamp(Mathf.RoundToInt(targetOffset.z / cell) + center, 0, size - 1);
+        Vector3 goalOffset = targetFlat - from;
+        int goalX = Mathf.Clamp(Mathf.RoundToInt(goalOffset.x / cell) + center, 0, size - 1);
+        int goalZ = Mathf.Clamp(Mathf.RoundToInt(goalOffset.z / cell) + center, 0, size - 1);
         int goal = goalX + goalZ * size;
         if (blocked[goal])
         {
-            // A player can be standing inside the target cell; choose the
-            // nearest free cell to it as the temporary goal.
+            /* 目标可能站在障碍格内，改用最近的可行格。 */
             float nearest = float.PositiveInfinity;
             int freeGoal = -1;
             for (int i = 0; i < count; i++)
@@ -297,7 +272,7 @@ public class MonsterAI : MonoBehaviour
                 if (nx < 0 || nx >= size || nz < 0 || nz >= size) continue;
                 int next = nx + nz * size;
                 if (blocked[next] || closed[next]) continue;
-                // Do not cut diagonally through a wall corner.
+                /* 禁止从墙角对角穿过。 */
                 if (n >= 4 &&
                     (blocked[(cx + dx[n]) + cz * size] || blocked[cx + (cz + dz[n]) * size])) continue;
                 float tentative = g[current] + ((n < 4) ? 1f : 1.4142f);
@@ -330,9 +305,7 @@ public class MonsterAI : MonoBehaviour
 
     private bool IsGridCellBlocked(Vector3 position, float baseY)
     {
-        // Use the same footprint as the movement SphereCast (plus the skin).
-        // A smaller planning radius produces waypoints that look free to A*
-        // but are rejected by the real movement probe at wall corners.
+        /* 规划半径与 SphereCast 一致，避免墙角路径被实际检测拒绝。 */
         float radius = Mathf.Max(0.1f, obstacleRadius) + Mathf.Max(0f, obstacleSkin);
         Vector3 origin = new Vector3(position.x, baseY + Mathf.Max(radius, obstacleProbeHeight), position.z);
         int count = Physics.OverlapSphereNonAlloc(origin, radius, overlapHits,
@@ -377,9 +350,7 @@ public class MonsterAI : MonoBehaviour
         if (target != null && root == target.root)
             return true;
 
-        // Other monsters and player hitboxes are dynamic actors, not walls.
-        // Ignoring them prevents a group of monsters from deadlocking in front
-        // of one another while still allowing static level geometry to block.
+        /* 忽略其他怪物和玩家碰撞体，避免怪群互相堵死；静态几何仍会阻挡。 */
         if (collider.GetComponentInParent<EnemyControl>() != null ||
             collider.GetComponentInParent<PlayerHealth>() != null)
             return true;
@@ -388,9 +359,7 @@ public class MonsterAI : MonoBehaviour
 
     private bool TryGetGroundY(Vector3 position, out float groundY)
     {
-        // Query all normal physics layers so raised roads/platforms on the
-        // Default layer are treated as ground too. The configured Ground layer
-        // remains supported, while filtering by surface normal avoids walls.
+        /* 查询普通物理层以支持道路和平台，并按法线过滤墙面。 */
         RaycastHit nearestHit;
         if (Physics.Raycast(position + Vector3.up * GroundRayHeight, Vector3.down,
             out nearestHit, GroundRayDistance, Physics.DefaultRaycastLayers,
@@ -437,8 +406,7 @@ public class MonsterAI : MonoBehaviour
             return true;
         }
 
-        // Terrain.SampleHeight also works when a terrain collider is disabled
-        // or temporarily unavailable to the physics query.
+        /* 物理查询不可用时使用 Terrain.SampleHeight。 */
         Terrain terrain = Terrain.activeTerrain;
         if (terrain != null && terrain.terrainData != null)
         {

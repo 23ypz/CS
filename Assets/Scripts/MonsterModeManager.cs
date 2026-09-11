@@ -3,14 +3,14 @@ using UnityEngine;
 
 public class MonsterModeManager : MonoBehaviour
 {
-    [Header("Monster mode")]
+    [Header("怪物设置")]
     [Range(1, 20)]
     public int monsterCount = 5;
     [Range(1, 100)]
     public int monsterHealth = 10;
     public float monsterSpeed = 2.5f;
 
-    [Header("Spawn")]
+    [Header("生成设置")]
     public float spawnRadius = 35f;
     public float spawnHeight = 10f;
     public float spawnSpread = 12f;
@@ -18,7 +18,7 @@ public class MonsterModeManager : MonoBehaviour
     public float groundClearance = 0.02f;
     public LayerMask groundMask;
 
-    [Tooltip("Optional prefab. If empty, the Enemy object already in the scene is used as the template.")]
+    [Tooltip("留空时使用场景中原有的 Enemy 对象作为模板。")]
     public GameObject monsterPrefab;
     public GameObject deathEffect;
 
@@ -32,11 +32,11 @@ public class MonsterModeManager : MonoBehaviour
     private bool playing;
     private bool finished;
     private bool controlledByGameModeManager;
-    private bool networkControlled;
+    private bool networkControlled; // 联机时由服务器管理怪物
     private string legacyCountInput = "5";
     private string legacyHealthInput = "10";
     private string legacySettingsMessage = string.Empty;
-    private MonsterWaveSequence waveSequence;
+    private MonsterWaveSequence waveSequence; // 本局波次调度
 
     public bool IsPlaying { get { return playing; } }
     public int CurrentWave { get { return waveSequence != null ? waveSequence.CurrentWave : 0; } }
@@ -71,8 +71,7 @@ public class MonsterModeManager : MonoBehaviour
         legacyCountInput = monsterCount.ToString();
         legacyHealthInput = monsterHealth.ToString();
 
-        // Keep the original scene enemy as an inactive template. It will not attack
-        // or appear before the player confirms the mode settings.
+        /* 保留原场景怪物作为隐藏模板，确认模式后才启用。 */
         if (sceneEnemyTemplate != null)
             sceneEnemyTemplate.SetActive(false);
 
@@ -87,8 +86,7 @@ public class MonsterModeManager : MonoBehaviour
 
     private void OnDestroy()
     {
-        // Do not leave the editor/game paused if this manager is removed or the
-        // scene changes while the setup panel is open.
+        /* 管理器销毁或切场景时恢复暂停状态。 */
         if (Time.timeScale == 0f)
             Time.timeScale = 1f;
         if (playerControl != null)
@@ -148,8 +146,7 @@ public class MonsterModeManager : MonoBehaviour
         if (networkControlled || !playing || finished)
             return;
 
-        // Spawn on a fixed schedule even if earlier monsters are still alive.
-        // Scaled time intentionally stops the single-player schedule on pause.
+        /* 按固定节奏生成，暂停时使用缩放时间停止调度。 */
         waveSequence.Advance(Time.deltaTime);
         MonsterWaveSequence.Stats stats;
         while (waveSequence.TryBeginNextWave(out stats))
@@ -217,9 +214,7 @@ public class MonsterModeManager : MonoBehaviour
                 continue;
             }
 
-            // Only turn around the vertical axis. Using the player's full 3D
-            // position here gives the monster a pitch, which changes the
-            // renderer bounds and makes the later ground correction unstable.
+            /* 只绕垂直轴旋转，避免俯仰导致模型边界和地面校正抖动。 */
             Vector3 lookDirection = player.position - position;
             lookDirection.y = 0f;
             Quaternion rotation = lookDirection.sqrMagnitude > 0.001f
@@ -227,8 +222,7 @@ public class MonsterModeManager : MonoBehaviour
                 : Quaternion.identity;
             GameObject monster = Instantiate(monsterPrefab, position, rotation);
             monster.name = "Monster_Wave" + stats.Wave + "_" + (i + 1);
-            // Keep spawned instances discoverable by other gameplay systems that
-            // use the Enemy tag, even though damage detection uses EnemyControl.
+            /* 保留 Enemy 标签，兼容其他玩法系统的查找。 */
             monster.tag = "Enemy";
             monster.SetActive(true);
 
@@ -241,7 +235,6 @@ public class MonsterModeManager : MonoBehaviour
 
             monsters.Add(monster);
         }
-
     }
 
     private void ClearMonsters()
@@ -302,8 +295,7 @@ public class MonsterModeManager : MonoBehaviour
         }
         else if (collider.attachedRigidbody == null && monster.GetComponent<Rigidbody>() == null)
         {
-            // A collider on a child needs a root rigidbody for reliable bullet
-            // collision callbacks and smooth kinematic movement.
+            /* 子物体碰撞体需要根刚体，确保子弹回调和运动稳定。 */
             monster.AddComponent<Rigidbody>();
         }
 
@@ -328,12 +320,7 @@ public class MonsterModeManager : MonoBehaviour
 
     private bool TryGetSpawnPosition(int index, out Vector3 position)
     {
-        // Try several nearby points. This avoids spawning outside the terrain or
-        // on a position where the raycast has no valid ground hit.
-        // A point can have a valid ground ray while its monster body is inside
-        // a wall, especially at the outer edge of the city. Try a generous,
-        // deterministic sample set and validate the complete footprint before
-        // accepting the point.
+        /* 尝试多个附近点，检查地面和完整碰撞体，避免生成在墙内或地形外。 */
         for (int attempt = 0; attempt < 48; attempt++)
         {
             float angle = (index * 137.5f + attempt * 29f + Random.Range(-20f, 20f)) * Mathf.Deg2Rad;
@@ -371,9 +358,7 @@ public class MonsterModeManager : MonoBehaviour
                 return false;
         }
 
-        // Use a conservative capsule even before the prefab's runtime
-        // collider is attached. Ignore the floor and the inactive template;
-        // every other overlap is a wall, prop, player, or active actor.
+        /* 运行时碰撞体创建前先用保守胶囊检测，忽略地面和隐藏模板。 */
         int count = Physics.OverlapCapsuleNonAlloc(
             position + Vector3.up * 0.12f,
             position + Vector3.up * 1.7f,
@@ -389,9 +374,7 @@ public class MonsterModeManager : MonoBehaviour
                 continue;
             if (hit is TerrainCollider || hit.gameObject.layer == groundLayer)
                 continue;
-            // Some city floor meshes are not assigned to the Ground layer.
-            // Their thin collider sits below the capsule; do not mistake it
-            // for a wall and reject every otherwise valid spawn point.
+            /* 城市地面网格可能未设 Ground 层，薄碰撞体不应被当作墙。 */
             if (hit.bounds.max.y <= position.y + 0.2f)
                 continue;
             if (sceneEnemyTemplate != null &&
@@ -405,8 +388,7 @@ public class MonsterModeManager : MonoBehaviour
 
     private bool TryGetGroundHeight(Vector3 position, out float groundY)
     {
-        // Use a generous ray range because the city terrain is not guaranteed to
-        // be close to the player's current height.
+        /* 城市地形高度不固定，使用较长射线。 */
         float rayHeight = Mathf.Max(spawnHeight, 50f);
         Vector3 rayStart = position + Vector3.up * rayHeight;
         RaycastHit[] hits = Physics.RaycastAll(rayStart, Vector3.down,
@@ -415,9 +397,7 @@ public class MonsterModeManager : MonoBehaviour
         bool foundGround = false;
         for (int i = 0; i < hits.Length; i++)
         {
-            // Ignore walls/ceilings and select the highest upward-facing surface.
-            // This lets monsters stand on raised roads and platforms instead of
-            // being snapped to the terrain far below them.
+            /* 忽略墙面和天花板，选择最高的向上表面。 */
             if (hits[i].normal.y < 0.35f)
                 continue;
 
@@ -434,8 +414,7 @@ public class MonsterModeManager : MonoBehaviour
             return true;
         }
 
-        // Terrain.SampleHeight is a safe fallback when a point is within the
-        // active terrain but its collider was not hit by the raycast.
+        /* 射线未命中活动地形时使用 Terrain.SampleHeight。 */
         Terrain terrain = Terrain.activeTerrain;
         if (terrain != null && terrain.terrainData != null)
         {

@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading;
 using UnityEngine;
 
-/// <summary>Unity client for the asyncio server in server/main.py.</summary>
+/* 连接 server/main.py 的 Unity 客户端。 */
 public class NetworkClient : MonoBehaviour
 {
     public static NetworkClient Active { get; private set; }
@@ -17,9 +17,9 @@ public class NetworkClient : MonoBehaviour
     public event Action LobbyEntered;
     public event Action<int, int> GameStarted;
     public event Action<NetScore[]> ScoresChanged;
-    /// <summary>Authoritative local player health and death state from snapshots.</summary>
+    /* 快照中的本地玩家权威血量与死亡状态。 */
     public event Action<int, int, bool, float> PlayerHealthChanged;
-    /// <summary>Authoritative monster settings received from the lobby host.</summary>
+    /* 从房主大厅收到的权威怪物设置。 */
     public int MonsterCount { get; private set; } = 5;
     public int MonsterHealth { get; private set; } = 10;
     public int CurrentWave { get; private set; }
@@ -30,11 +30,12 @@ public class NetworkClient : MonoBehaviour
     {
         get { return NextWave == 0 ? 0f : Mathf.Max(0f, waveRemainingAtSnapshot - (Time.unscaledTime - waveSnapshotTime)); }
     }
-    private float waveRemainingAtSnapshot;
-    private float waveSnapshotTime;
+    private float waveRemainingAtSnapshot; /* 收到快照时的波次倒计时。 */
+    private float waveSnapshotTime; /* 本地接收时刻，用于平滑显示倒计时。 */
     public IEnumerable<NetworkPlayerView> RemotePlayers { get { return remotePlayers.Values; } }
     public IEnumerable<NetworkPlayerView> RemoteMonsters { get { return remoteMonsters.Values; } }
 
+    /* 网络线程只入队，Unity 主线程统一应用消息。 */
     private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
     private readonly Dictionary<int, NetworkPlayerView> remotePlayers = new Dictionary<int, NetworkPlayerView>();
     private readonly Dictionary<int, NetworkPlayerView> remoteMonsters = new Dictionary<int, NetworkPlayerView>();
@@ -49,21 +50,21 @@ public class NetworkClient : MonoBehaviour
     private string sessionToken;
     private int localId = -1;
     private int inputSequence;
-    private int lastSnapshotTick = -1;
-    private int lastScoreTick = -1;
+    private int lastSnapshotTick = -1; /* 防止乱序快照回退。 */
+    private int lastScoreTick = -1; /* TCP 事件与 UDP 分数快照共用顺序。 */
     private bool connected;
     private bool gameStarted;
     private bool mapReady;
     private Transform localPlayer;
     private GameObject localPlayerObject;
     private NetworkMapData map;
-    private Vector3 predictedPosition;
-    private float predictedVelocity;
+    private Vector3 predictedPosition; /* 本地预测的脚底位置。 */
+    private float predictedVelocity; /* 预测垂直速度。 */
     private bool predictionInitialized;
     private bool locallyPaused;
     private float predictionClock;
-    private int weaponSequence;
-    private int weaponLife;
+    private int weaponSequence; /* 所有武器命令共用递增序号。 */
+    private int weaponLife; /* 最近快照确认的生命代次。 */
     private bool bodyConfigured;
     private bool originalKinematic;
     private bool originalUseGravity;
@@ -91,6 +92,7 @@ public class NetworkClient : MonoBehaviour
 
     public void Connect(string serverAddress, int serverPort, string nickname)
     {
+        /* 连接阶段：建立 TCP/UDP 通道，启动接收线程，再发送 hello。 */
         host = string.IsNullOrEmpty(serverAddress) ? "127.0.0.1" : serverAddress;
         port = serverPort;
         playerName = string.IsNullOrEmpty(nickname) ? "玩家" : nickname;
@@ -107,10 +109,10 @@ public class NetworkClient : MonoBehaviour
             udpThread.Start();
             localPlayerObject = GameObject.FindGameObjectWithTag("Player");
             localPlayer = localPlayerObject != null ? localPlayerObject.transform : null;
-            Vector3 startPosition = localPlayer != null ? localPlayer.position : Vector3.zero;
+            Vector3 startPos = localPlayer != null ? localPlayer.position : Vector3.zero;
             SendTcp(JsonUtility.ToJson(new NetMessage {
                 type = "hello", name = Clean(playerName), version = 3,
-                x = startPosition.x, y = startPosition.y, z = startPosition.z
+                x = startPos.x, y = startPos.y, z = startPos.z
             }));
             StatusChanged?.Invoke("已连接，等待服务器确认…");
         }
@@ -123,6 +125,7 @@ public class NetworkClient : MonoBehaviour
 
     public void Tick()
     {
+        /* 主线程阶段：消费网络线程入队的消息，并寻找尚未出现的本地 Player。 */
         while (incoming.TryDequeue(out string message))
         {
             if (connected) HandleMessage(message);
@@ -132,13 +135,12 @@ public class NetworkClient : MonoBehaviour
             localPlayerObject = GameObject.FindGameObjectWithTag("Player");
             if (localPlayerObject != null) localPlayer = localPlayerObject.transform;
         }
-        // WeaponControl owns input and the single fire timer. Never sample
-        // the mouse again here: independent timers used to send different
-        // shots from the ones for which the weapon played effects/spent ammo.
+        /* WeaponControl 统一处理输入和射击计时，这里不重复采样鼠标。 */
     }
 
     public bool DrivePlayer(Rigidbody body, Vector2 move, float yaw, float pitch, bool jump, bool run)
     {
+        /* 预测阶段：按服务端 tick 推进本地位置，再把带序号输入发给 UDP。 */
         if (!IsGameStarted || body == null || locallyPaused) return IsGameStarted;
         ConfigureNetworkBody(body);
         if (!predictionInitialized)
@@ -165,6 +167,7 @@ public class NetworkClient : MonoBehaviour
 
     public void SendReady()
     {
+        /* 大厅协议：准备消息携带当前房主设置。 */
         SendTcp(JsonUtility.ToJson(new NetMessage {
             type = "ready", count = MonsterCount, health = MonsterHealth
         }));
@@ -180,6 +183,7 @@ public class NetworkClient : MonoBehaviour
     }
     public void SendStart(int count, int health)
     {
+        /* 大厅协议：房主发送经过本地范围限制的开局设置。 */
         MonsterCount = Mathf.Clamp(count, 1, 20);
         MonsterHealth = Mathf.Clamp(health, 1, 100);
         SendTcp(JsonUtility.ToJson(new NetMessage {
@@ -189,10 +193,11 @@ public class NetworkClient : MonoBehaviour
         }));
     }
 
-    // Keep older parameterless host-start call sites source-compatible.
+    /* 保留无参数启动调用的兼容性。 */
     public void SendStart() { SendStart(MonsterCount, MonsterHealth); }
     public bool SendShoot(Vector3 origin, Vector3 direction)
     {
+        /* 武器协议：所有射击命令共享序号和生命代次。 */
         if (!connected || !IsGameStarted || locallyPaused || weaponLife <= 0) return false;
         SendTcp(JsonUtility.ToJson(new NetMessage {
             type = "shoot", weaponSeq = ++weaponSequence, life = weaponLife,
@@ -204,12 +209,13 @@ public class NetworkClient : MonoBehaviour
 
     public int SendAmmoAction(string action)
     {
+        /* 换弹/补给沿用同一套序号，服务器按生命代次去重。 */
         if (!connected || !IsGameStarted || locallyPaused || weaponLife <= 0) return 0;
-        int sequence = ++weaponSequence;
+        int seq = ++weaponSequence;
         SendTcp(JsonUtility.ToJson(new NetMessage {
-            type = "ammo_action", action = action, weaponSeq = sequence, life = weaponLife
+            type = "ammo_action", action = action, weaponSeq = seq, life = weaponLife
         }));
-        return sequence;
+        return seq;
     }
 
     public void Disconnect()
@@ -258,6 +264,7 @@ public class NetworkClient : MonoBehaviour
 
     private void ReadTcp()
     {
+        /* TCP 接收阶段：按换行拆帧，只入队，不在后台线程触碰 Unity 对象。 */
         try
         {
             using (StreamReader reader = new StreamReader(tcpStream, Encoding.UTF8, false, 2048, true))
@@ -277,6 +284,7 @@ public class NetworkClient : MonoBehaviour
 
     private void ReadUdp()
     {
+        /* UDP 接收阶段：读取快照/校正包，交由主线程统一解析。 */
         try
         {
             IPEndPoint endpoint = new IPEndPoint(IPAddress.Any, 0);
@@ -291,6 +299,7 @@ public class NetworkClient : MonoBehaviour
 
     private void HandleMessage(string raw)
     {
+        /* 协议分发阶段：反序列化后按消息类型进入大厅、快照或校正流程。 */
         NetMessage message;
         try { message = JsonUtility.FromJson<NetMessage>(raw); } catch { return; }
         if (message == null || string.IsNullOrEmpty(message.type)) return;
@@ -355,12 +364,9 @@ public class NetworkClient : MonoBehaviour
 
     private void HandleSnapshot(NetMessage message)
     {
+        /* 快照阶段：先按 tick 丢弃旧包，再应用设置、分数、波次和角色状态。 */
         if (!connected || !IsGameStarted) return;
-        // UDP can arrive out of order.  Ignoring stale snapshots prevents a
-        // killed monster from being recreated briefly (and exploding twice)
-        // and stops leaderboard scores from rolling backwards.
-        // Older compatible servers may omit the tick (deserializing as 0),
-        // so only apply ordering when a positive sequence is present.
+        /* UDP 可能乱序；丢弃旧快照，避免怪物复现和排行榜回退。 */
         if (message.tick > 0)
         {
             if (message.tick <= lastSnapshotTick)
@@ -368,8 +374,7 @@ public class NetworkClient : MonoBehaviour
             lastSnapshotTick = message.tick;
         }
 
-        // Settings and scores are valid even when a partial snapshot omits an
-        // actor array.  Consume them before processing transforms.
+        /* 即使快照缺少角色数组，设置和分数仍然有效。 */
         if (message.count > 0)
             MonsterCount = Mathf.Clamp(message.count, 1, 20);
         if (message.health > 0)
@@ -381,53 +386,50 @@ public class NetworkClient : MonoBehaviour
             HandleMonsterSnapshot(message.monsters);
             return;
         }
-        HashSet<int> presentPlayers = new HashSet<int>();
+        HashSet<int> present = new HashSet<int>();
         for (int i = 0; i < message.players.Length; i++)
         {
             NetEntity entity = message.players[i];
             if (entity.id == localId)
             {
                 int maxHp = entity.maxHp > 0 ? entity.maxHp : 100;
-                PlayerHealth localHealth = localPlayer != null
+                PlayerHealth health = localPlayer != null
                     ? localPlayer.GetComponent<PlayerHealth>() : null;
-                WeaponControl localWeapon = localPlayer != null
+                WeaponControl weapon = localPlayer != null
                     ? localPlayer.GetComponent<WeaponControl>() : null;
-                bool wasDead = localHealth != null && localHealth.IsDead;
+                bool wasDead = health != null && health.IsDead;
                 PlayerHealthChanged?.Invoke(entity.hp, maxHp, entity.dead,
                     Mathf.Max(0f, entity.respawn));
-                if (localHealth != null)
-                    localHealth.ApplyAuthoritativeState(entity.hp, maxHp,
+                if (health != null)
+                    health.ApplyAuthoritativeState(entity.hp, maxHp,
                         entity.dead, Mathf.Max(0f, entity.respawn),
                         new Vector3(entity.x, entity.y, entity.z));
-                // Restore life/camera first; then apply the matching weapon
-                // state so no local respawn reset can overwrite this packet.
+                /* 先恢复生命代次，再应用对应武器状态。 */
                 if (entity.weaponState && entity.life >= weaponLife)
                 {
                     weaponLife = entity.life;
-                    if (localWeapon != null) localWeapon.ApplyAuthoritativeAmmo(entity);
+                    if (weapon != null) weapon.ApplyAuthoritativeAmmo(entity);
                 }
-                Vector3 serverPosition = new Vector3(entity.x, entity.y, entity.z);
-                // The server chooses the multiplayer respawn point. Override
-                // the local random visual position as soon as that snapshot
-                // arrives so prediction and the authoritative player agree.
+                Vector3 serverPos = new Vector3(entity.x, entity.y, entity.z);
+                /* 复活点由服务器选择，收到快照后覆盖本地预测位置。 */
                 if (!entity.dead && localPlayer != null &&
-                    (wasDead || (localHealth != null &&
-                     localHealth.CurrentHealth >= maxHp &&
-                     Vector3.Distance(localPlayer.position, serverPosition) > 2f)))
+                    (wasDead || (health != null &&
+                     health.CurrentHealth >= maxHp &&
+                     Vector3.Distance(localPlayer.position, serverPos) > 2f)))
                 {
-                    localPlayer.position = serverPosition;
+                    localPlayer.position = serverPos;
                     Rigidbody localBody = localPlayer.GetComponent<Rigidbody>();
                     if (localBody != null)
-                        localBody.position = serverPosition;
-                    predictedPosition = serverPosition;
+                        localBody.position = serverPos;
+                    predictedPosition = serverPos;
                     predictedVelocity = 0f;
                     predictionInitialized = true;
                 }
-                float error = Vector3.Distance(predictedPosition, serverPosition);
-                ReconcilePosition(serverPosition, error);
+                float error = Vector3.Distance(predictedPosition, serverPos);
+                ReconcilePosition(serverPos, error);
                 continue;
             }
-            presentPlayers.Add(entity.id);
+            present.Add(entity.id);
             NetworkPlayerView view;
             if (!remotePlayers.TryGetValue(entity.id, out view) || view == null)
             {
@@ -438,22 +440,21 @@ public class NetworkClient : MonoBehaviour
             view.SetTarget(new Vector3(entity.x, entity.y, entity.z), Quaternion.Euler(0f, entity.yaw, 0f));
             view.SetHealth(entity.hp, entity.maxHp, entity.dead, entity.respawn);
         }
-        List<int> removedPlayers = new List<int>();
+        List<int> removed = new List<int>();
         foreach (int id in remotePlayers.Keys)
-            if (!presentPlayers.Contains(id)) removedPlayers.Add(id);
-        for (int i = 0; i < removedPlayers.Count; i++)
+            if (!present.Contains(id)) removed.Add(id);
+        for (int i = 0; i < removed.Count; i++)
         {
-            NetworkPlayerView view = remotePlayers[removedPlayers[i]];
+            NetworkPlayerView view = remotePlayers[removed[i]];
             if (view != null) Destroy(view.gameObject);
-            remotePlayers.Remove(removedPlayers[i]);
+            remotePlayers.Remove(removed[i]);
         }
         HandleMonsterSnapshot(message.monsters);
     }
 
     private void ReadWaveState(NetMessage message)
     {
-        // Older servers omit these optional fields. Also avoid rolling a wave
-        // back if its TCP start message arrives after a newer UDP snapshot.
+        /* 波次阶段：兼容旧服务器，并避免 TCP 开局消息覆盖较新的 UDP 波次。 */
         if (message.totalWaves <= 0 || message.wave < CurrentWave)
             return;
         TotalWaves = message.totalWaves;
@@ -474,9 +475,7 @@ public class NetworkClient : MonoBehaviour
             return false;
 
         long cells = (long)value.width * value.depth;
-        // Reject malformed packets before NetworkMapData.Step can index arrays.
-        // The normal capture is 81x81; this upper bound prevents bogus
-        // dimensions from making the client accept an unusable map.
+        /* 先拒绝非法地图，避免索引越界；限制最大地图尺寸。 */
         return cells <= 1024L * 1024L && value.heights.Length >= cells &&
                value.walkable.Length >= cells;
     }
@@ -485,9 +484,7 @@ public class NetworkClient : MonoBehaviour
     {
         if (scores == null)
             return;
-        // Kill events travel over TCP while snapshots use UDP.  Tagging both
-        // with the authoritative server tick prevents a delayed pre-kill UDP
-        // packet from rolling the leaderboard back after a TCP event.
+        /* 击杀事件走 TCP、快照走 UDP，使用服务器 tick 防止分数回退。 */
         if (serverTick > 0 && (serverTick < lastScoreTick ||
             (serverTick == lastScoreTick && !authoritativeEvent)))
             return;
@@ -498,6 +495,7 @@ public class NetworkClient : MonoBehaviour
 
     private void HandleMonsterSnapshot(NetEntity[] entities)
     {
+        /* 怪物阶段：按服务器实体 id 创建/更新代理，缺失实体触发死亡特效后销毁。 */
         if (entities == null) return;
         HashSet<int> present = new HashSet<int>();
         GameObject prefab = null;
@@ -513,27 +511,23 @@ public class NetworkClient : MonoBehaviour
             {
                 GameObject monster = Instantiate(prefab, new Vector3(entity.x, entity.y, entity.z), Quaternion.identity);
                 monster.name = "NetworkMonster_" + entity.id;
-                MonsterAI[] aiComponents = monster.GetComponentsInChildren<MonsterAI>(true);
-                for (int c = 0; c < aiComponents.Length; c++)
-                    aiComponents[c].enabled = false;
-                EnemyControl[] healthComponents = monster.GetComponentsInChildren<EnemyControl>(true);
-                for (int c = 0; c < healthComponents.Length; c++)
+                MonsterAI[] aiParts = monster.GetComponentsInChildren<MonsterAI>(true);
+                for (int c = 0; c < aiParts.Length; c++)
+                    aiParts[c].enabled = false;
+                EnemyControl[] healthParts = monster.GetComponentsInChildren<EnemyControl>(true);
+                for (int c = 0; c < healthParts.Length; c++)
                 {
-                    // Network health is server authoritative.  Leave the
-                    // component available for hitbox discovery, but make its
-                    // local HP effectively inexhaustible so BulletControl can
-                    // never destroy the proxy before the server confirms a
-                    // kill in the next snapshot.
-                    healthComponents[c].hp = int.MaxValue;
-                    healthComponents[c].bombEffect = null;
-                    healthComponents[c].SetNetworkControlled(true);
+                    /* 网络血量由服务器负责；保留碰撞组件，但禁止本地提前销毁代理。 */
+                    healthParts[c].hp = int.MaxValue;
+                    healthParts[c].bombEffect = null;
+                    healthParts[c].SetNetworkControlled(true);
                 }
-                Rigidbody monsterBody = monster.GetComponent<Rigidbody>();
-                if (monsterBody != null)
+                Rigidbody body = monster.GetComponent<Rigidbody>();
+                if (body != null)
                 {
-                    monsterBody.isKinematic = true;
-                    monsterBody.useGravity = false;
-                    monsterBody.interpolation = RigidbodyInterpolation.Interpolate;
+                    body.isKinematic = true;
+                    body.useGravity = false;
+                    body.interpolation = RigidbodyInterpolation.Interpolate;
                 }
                 view = monster.AddComponent<NetworkPlayerView>();
                 monster.SetActive(true);
@@ -559,24 +553,24 @@ public class NetworkClient : MonoBehaviour
 
     private void Reconcile(NetMessage message)
     {
-        Vector3 server = new Vector3(message.x, message.y, message.z);
+        /* 校正阶段：服务器回包只修正明显漂移，保留正常预测的连续性。 */
+        Vector3 serverPos = new Vector3(message.x, message.y, message.z);
         if (!predictionInitialized)
         {
-            predictedPosition = server;
+            predictedPosition = serverPos;
             predictionInitialized = true;
             return;
         }
-        ReconcilePosition(server, Vector3.Distance(predictedPosition, server));
+        ReconcilePosition(serverPos, Vector3.Distance(predictedPosition, serverPos));
     }
 
-    private void ReconcilePosition(Vector3 serverPosition, float error)
+    private void ReconcilePosition(Vector3 serverPos, float error)
     {
-        // Ignore normal packet-timing error. Correct only meaningful drift so
-        // every UDP packet does not pull the Rigidbody back and forth.
+        /* 忽略正常时序误差，只修正明显漂移，避免刚体来回抖动。 */
         if (error > 3f)
-            predictedPosition = serverPosition;
+            predictedPosition = serverPos;
         else if (error > 0.75f)
-            predictedPosition = Vector3.Lerp(predictedPosition, serverPosition, 0.12f);
+            predictedPosition = Vector3.Lerp(predictedPosition, serverPos, 0.12f);
     }
 
     private void ConfigureNetworkBody(Rigidbody body)
@@ -623,7 +617,7 @@ public class NetworkClient : MonoBehaviour
         RecoilControl recoil = clone.GetComponent<RecoilControl>(); if (recoil != null) recoil.enabled = false;
         foreach (Camera camera in clone.GetComponentsInChildren<Camera>(true)) camera.enabled = false;
         foreach (AudioListener listener in clone.GetComponentsInChildren<AudioListener>(true)) listener.enabled = false;
-        // Preserve the component and all its settings; remote playback is simply disabled.
+        /* 保留组件及设置，仅关闭远端播放。 */
         AudioSource source = clone.GetComponent<AudioSource>(); if (source != null) source.enabled = false;
         Rigidbody body = clone.GetComponent<Rigidbody>(); if (body != null) { body.isKinematic = true; body.useGravity = false; }
         return clone.AddComponent<NetworkPlayerView>();
@@ -631,6 +625,7 @@ public class NetworkClient : MonoBehaviour
 
     private void SendTcp(string message)
     {
+        /* TCP 发送阶段：补换行形成一帧 JSON，写入失败时由连接状态处理。 */
         if (tcpStream == null || !tcpStream.CanWrite) return;
         byte[] bytes = Encoding.UTF8.GetBytes(message + "\n");
         try { tcpStream.Write(bytes, 0, bytes.Length); tcpStream.Flush(); } catch { }
@@ -638,23 +633,25 @@ public class NetworkClient : MonoBehaviour
 
     private void SendUdp(string message)
     {
+        /* UDP 发送阶段：输入和 bind 包不追加换行，直接发送 UTF-8 数据报。 */
         if (udp == null) return;
         try { byte[] bytes = Encoding.UTF8.GetBytes(message); udp.Send(bytes, bytes.Length, host, port); } catch { }
     }
 
     private System.Collections.IEnumerator CaptureAndUploadMap()
     {
+        /* 地图阶段：等待本地 Player，分帧采集碰撞图，再经 TCP 上传。 */
         while (localPlayer == null)
         {
             localPlayerObject = GameObject.FindGameObjectWithTag("Player");
             if (localPlayerObject != null) localPlayer = localPlayerObject.transform;
             yield return null;
         }
-        NetworkMapData captured = null;
-        yield return NetworkMap.Capture(localPlayer, value => captured = value,
+        NetworkMapData mapData = null;
+        yield return NetworkMap.Capture(localPlayer, value => mapData = value,
             value => StatusChanged?.Invoke("正在准备联机地图… " + Mathf.RoundToInt(value * 100f) + "%"));
-        if (captured != null)
-            SendTcp(JsonUtility.ToJson(new NetMessage { type = "map", map = captured }));
+        if (mapData != null)
+            SendTcp(JsonUtility.ToJson(new NetMessage { type = "map", map = mapData }));
     }
 
     private static string Clean(string value) { return (value ?? "玩家").Replace("|", " ").Replace(";", " ").Replace(",", " ").Trim(); }

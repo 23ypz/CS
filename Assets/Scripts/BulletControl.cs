@@ -2,8 +2,8 @@ using UnityEngine;
 
 public class BulletControl : MonoBehaviour
 {
-    public float speed = 30f;
-    public GameObject effectPrefab;
+    public float speed = 30f; // 发射冲量大小
+    public GameObject effectPrefab; // 命中特效
 
     private Rigidbody rb;
 
@@ -18,7 +18,7 @@ public class BulletControl : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {
-        // If the bullet hits a destructible object.
+        /* 子弹命中可破坏目标。 */
         if (collision.gameObject.CompareTag("des"))
         {
             Rigidbody rbody = collision.gameObject.GetComponent<Rigidbody>();
@@ -31,7 +31,7 @@ public class BulletControl : MonoBehaviour
             Destroy(collision.gameObject, 2f);
         }
 
-        // Hitboxes can be child objects, so find health on the parent hierarchy.
+        /* 命中体可能是子物体，从父级查找生命组件。 */
         EnemyControl enemy = collision.collider.GetComponentInParent<EnemyControl>();
         if (enemy != null)
             enemy.Gethit(2, transform.forward);

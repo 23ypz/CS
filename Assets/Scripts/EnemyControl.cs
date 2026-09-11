@@ -2,23 +2,17 @@ using UnityEngine;
 
 public class EnemyControl : MonoBehaviour
 {
-    public int hp = 10;
-    public GameObject bombEffect;
+    public int hp = 10; // 当前血量
+    public GameObject bombEffect; // 死亡爆炸预制体
 
-    // Small impulse applied when a projectile hits this monster.  MonsterAI
-    // keeps the movement authoritative in single-player while the server
-    // applies the equivalent impulse for network monsters.
+    /* 子弹命中时施加水平击退；单机由 MonsterAI，联机由服务器同步。 */
     [Min(0f)]
     public float knockbackForce = 2.2f;
 
     private bool dead;
     private bool networkControlled;
 
-    /// <summary>
-    /// Network monsters are damaged by the authoritative server. Their local
-    /// visual proxies can still receive bullet collisions, but must not be
-    /// removed before a server snapshot confirms the kill.
-    /// </summary>
+    /* 联机怪物由服务器扣血，客户端代理等待快照确认后再移除。 */
     public void SetNetworkControlled(bool value)
     {
         networkControlled = value;
@@ -29,7 +23,7 @@ public class EnemyControl : MonoBehaviour
         Gethit(damage, Vector3.zero);
     }
 
-    /// <summary>Damages the monster and applies a short horizontal knockback.</summary>
+    /* 造成伤害并施加短暂水平击退。 */
     public void Gethit(int damage, Vector3 hitDirection)
     {
         if (dead || networkControlled)
@@ -51,14 +45,12 @@ public class EnemyControl : MonoBehaviour
             return;
 
         dead = true;
-
         SpawnDeathEffect(bombEffect, transform.root);
-
-        // EnemyControl may be placed on a child hitbox; remove the whole monster.
+        /* 命中体可能在子物体上，因此移除整个怪物根对象。 */
         Destroy(transform.root.gameObject);
     }
 
-    /// <summary>Creates and starts an explosion, then cleans it up after it ends.</summary>
+    /* 创建爆炸特效，并在播放结束后清理。 */
     public static void SpawnDeathEffect(GameObject prefab, Transform target)
     {
         if (prefab == null || target == null)

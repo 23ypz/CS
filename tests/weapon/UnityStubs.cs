@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-// Only engine/network boundaries are replaced. The tests compile the actual
-// production WeaponControl.cs and NetworkProtocol.cs, not a copied state machine.
+// 仅替代引擎和网络边界，测试直接编译实际武器与协议源码。
 namespace UnityEngine
 {
     public class Object

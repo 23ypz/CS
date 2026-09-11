@@ -14,9 +14,9 @@ public class PlayerControl : MonoBehaviour
     public float xScensitivity = 7;
     public float yScensitivity = 7;
 
-    private float xRotation;
-    private float yaw;
-    private Vector2 moveInput;
+    private float xRotation; // 俯仰角
+    private float yaw; // 水平朝向
+    private Vector2 moveInput; // 平面移动输入
     private bool jumpRequested;
 
     [HideInInspector]
@@ -30,20 +30,18 @@ public class PlayerControl : MonoBehaviour
         ani = GetComponentInChildren<Animator>();
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         yaw = rb.rotation.eulerAngles.y;
-        // Keep sensitivity between sessions when the pause-menu settings are
-        // applied. Existing prefab values remain the fallback for first run.
+        // 保留设置，首次运行使用预制体默认值。
         xScensitivity = PlayerPrefs.GetFloat("PlayerSensitivityX", xScensitivity);
         yScensitivity = PlayerPrefs.GetFloat("PlayerSensitivityY", yScensitivity);
         Cursor.lockState = CursorLockMode.Locked;
-        // Health is attached at runtime so the existing Player prefab and its
-        // AudioSource remain unchanged.
+        // 运行时挂载血量，保留原 Player 预制体和 AudioSource。
         if (GetComponent<PlayerHealth>() == null)
             gameObject.AddComponent<PlayerHealth>();
     }
 
-    // Update is called once per frame
     void Update()
     {
+        // 先处理死亡和菜单，避免残留移动或跳跃输入。
         PlayerHealth health = GetComponent<PlayerHealth>();
         if (health != null && health.IsDead)
         {
@@ -51,9 +49,7 @@ public class PlayerControl : MonoBehaviour
             jumpRequested = false;
             return;
         }
-        // Check Escape before sampling mouse axes. GameModeManager processes
-        // the same key later in the frame; returning here prevents the click
-        // that opens a menu from rotating the background view.
+        // 菜单键优先处理，避免打开菜单时鼠标晃动镜头。
         if (GameModeManager.IsGameplayPaused || GameModeManager.IsMenuVisible ||
             Input.GetKeyDown(KeyCode.Escape))
         {
@@ -62,13 +58,11 @@ public class PlayerControl : MonoBehaviour
             return;
         }
         Aim();
+        // 普通游戏帧依次读取视角、冲刺和移动。
         ReadLookInput();
         HighSpeed();
         ReadMoveInput();
         jumpRequested |= Input.GetKeyDown(KeyCode.Space);
-
-        //Debug.DrawRay(transform.position + Vector3.up * 0.2f,
-        //    -Vector3.up * 0.4f, Color.red);
     }
 
     void Aim()
@@ -78,7 +72,7 @@ public class PlayerControl : MonoBehaviour
         {
             isAiming = true;
             ani.SetBool("Aim", true);
-            ani.SetFloat("Aiming", Mathf.Lerp(aim,1,0.2f));
+            ani.SetFloat("Aiming", Mathf.Lerp(aim, 1, 0.2f));
         }
         else
         {
@@ -90,9 +84,7 @@ public class PlayerControl : MonoBehaviour
 
     void ReadLookInput()
     {
-        // Mouse deltas are sampled directly once per rendered frame. Keeping
-        // yaw separate from the Rigidbody prevents interpolation/correction
-        // from feeding back into the next mouse update.
+        // 每帧读取鼠标；独立保存 yaw，避免刚体插值反馈到输入。
         float x = Input.GetAxis("Mouse X");
         float y = Input.GetAxis("Mouse Y");
 
@@ -114,6 +106,7 @@ public class PlayerControl : MonoBehaviour
 
     void HighSpeed()
     {
+        // 只有接地时允许冲刺，同时切换持枪动画。
         if (Input.GetKey(KeyCode.LeftShift) && IsGround())
         {
             highSpeed = true;
@@ -138,6 +131,7 @@ public class PlayerControl : MonoBehaviour
 
     private void FixedUpdate()
     {
+        // 物理帧再次屏蔽死亡和菜单，防止继续惯性移动。
         PlayerHealth health = GetComponent<PlayerHealth>();
         if (health != null && health.IsDead)
         {
@@ -152,32 +146,30 @@ public class PlayerControl : MonoBehaviour
             return;
         }
 
-        Quaternion nextRotation = Quaternion.Euler(0f, yaw, 0f);
+        Quaternion rotation = Quaternion.Euler(0f, yaw, 0f);
 
-        // In multiplayer the network client predicts local movement and sends
-        // inputs to the authoritative Python server. The original Rigidbody
-        // movement below remains untouched for single-player mode.
+        // 联机由客户端预测并向服务器发输入，单机沿用刚体移动。
         NetworkClient network = NetworkClient.Active;
-        if (network != null && network.DrivePlayer(rb, moveInput, nextRotation.eulerAngles.y,
+        if (network != null && network.DrivePlayer(rb, moveInput, rotation.eulerAngles.y,
             xRotation, jumpRequested, highSpeed))
         {
             jumpRequested = false;
             return;
         }
 
-        rb.MoveRotation(nextRotation);
+        // 单机平面速度与重力分开，只在接地时处理跳跃。
+        rb.MoveRotation(rotation);
+        Vector3 dir = rotation * new Vector3(moveInput.x, 0f, moveInput.y);
+        if (dir.sqrMagnitude > 1f)
+            dir.Normalize();
 
-        Vector3 direction = nextRotation * new Vector3(moveInput.x, 0f, moveInput.y);
-        if (direction.sqrMagnitude > 1f)
-            direction.Normalize();
-
-        Vector3 nextVelocity = direction * speed;
-        nextVelocity.y = rb.velocity.y;
+        Vector3 velocity = dir * speed;
+        velocity.y = rb.velocity.y;
         if (jumpRequested && IsGround())
-            nextVelocity.y = jumpForce;
+            velocity.y = jumpForce;
 
         jumpRequested = false;
-        rb.velocity = nextVelocity;
+        rb.velocity = velocity;
     }
 
     private void LateUpdate()

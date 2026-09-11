@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$CompilerPath = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\Roslyn\csc.exe'
 )
 
@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {
     throw "C# compiler not found: $CompilerPath. Pass -CompilerPath with an installed csc.exe."
 }
 
-# Compilation/execution artifacts are isolated from Assets and removed in finally.
+# 构建产物与 Assets 隔离，并在 finally 中清理。
 $artifactRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $artifactDirectory = Join-Path $artifactRoot ('unity-weapon-tests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $artifactDirectory | Out-Null
@@ -27,7 +27,7 @@ try {
     & $testExecutable
     $exitStatus = $LASTEXITCODE
 } finally {
-    # Validate the exact generated directory before this one-shell recursive delete.
+    # 删除前验证实际临时目录，避免误删。
     $resolvedArtifacts = [System.IO.Path]::GetFullPath($artifactDirectory)
     $expectedParent = $artifactRoot.TrimEnd('\')
     if ([System.IO.Path]::GetDirectoryName($resolvedArtifacts) -ne $expectedParent -or

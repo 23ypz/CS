@@ -2,16 +2,15 @@ using System;
 using System.Collections;
 using UnityEngine;
 
-// A small, single-level collision grid shared by Python and Unity. World-space
-// feet coordinates are used everywhere; model-origin offsets are visual only.
+/* Unity 与 Python 共用的单层碰撞网格，统一使用世界坐标脚底位置。 */
 [Serializable]
 public class NetworkMapData
 {
-    public int width, depth;
+    public int width, depth; /* 网格列数、行数。 */
     public float originX, originZ, cell = 1f;
     public int spawn;
-    public float[] heights;
-    public int[] walkable;
+    public float[] heights; /* 每格地面世界高度。 */
+    public int[] walkable; /* 1 为可走，0 为阻挡。 */
 
     public int Index(float x, float z)
     {
@@ -28,6 +27,7 @@ public class NetworkMapData
 
     public void Step(ref Vector3 position, ref float vy, NetInput input)
     {
+        /* 预测阶段：用与服务端相同的 30Hz 步长处理移动、跳跃和落地。 */
         int old = Index(position.x, position.z);
         if (old < 0) return;
         const float dt = 1f / 30f;
@@ -52,40 +52,42 @@ public static class NetworkMap
 {
     public static IEnumerator Capture(Transform player, Action<NetworkMapData> done, Action<float> progress)
     {
+        /* 采集阶段：逐格射线检测地面和障碍，期间让出主线程避免卡顿。 */
         const int size = 81;
-        NetworkMapData data = new NetworkMapData {
+        NetworkMapData mapData = new NetworkMapData {
             width = size, depth = size, cell = 1f,
             originX = Mathf.Floor(player.position.x) - size / 2,
             originZ = Mathf.Floor(player.position.z) - size / 2,
             heights = new float[size * size], walkable = new int[size * size]
         };
-        int groundMask = LayerMask.GetMask("Ground");
-        Collider[] overlaps = new Collider[32];
+        int mask = LayerMask.GetMask("Ground");
+        Collider[] hits = new Collider[32];
         Physics.SyncTransforms();
-        for (int i = 0; i < data.walkable.Length; i++)
+        for (int i = 0; i < mapData.walkable.Length; i++)
         {
-            Vector3 point = new Vector3(data.originX + i % size, player.position.y, data.originZ + i / size);
-            RaycastHit ground;
-            if (Physics.Raycast(point + Vector3.up * 50f, Vector3.down, out ground, 100f, groundMask, QueryTriggerInteraction.Ignore))
+            Vector3 sample = new Vector3(mapData.originX + i % size, player.position.y, mapData.originZ + i / size);
+            RaycastHit hit;
+            if (Physics.Raycast(sample + Vector3.up * 50f, Vector3.down, out hit, 100f, mask, QueryTriggerInteraction.Ignore))
             {
-                point.y = ground.point.y;
-                data.heights[i] = Mathf.Round(point.y * 1000f) / 1000f;
-                bool blocked = ground.normal.y < .7f;
-                int n = Physics.OverlapCapsuleNonAlloc(point + Vector3.up * .48f, point + Vector3.up * 1.4f,
-                    .38f, overlaps, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
-                if (n == overlaps.Length) blocked = true;
-                for (int c = 0; c < n; c++)
+                sample.y = hit.point.y;
+                mapData.heights[i] = Mathf.Round(sample.y * 1000f) / 1000f;
+                // 只把接近竖直的面当墙，丘陵坡面允许怪物行走。
+                bool blocked = hit.normal.y < .45f;
+                int hitCount = Physics.OverlapCapsuleNonAlloc(sample + Vector3.up * .48f, sample + Vector3.up * 1.4f,
+                    .38f, hits, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+                if (hitCount == hits.Length) blocked = true;
+                for (int c = 0; c < hitCount; c++)
                 {
-                    Collider hit = overlaps[c];
-                    if (hit.transform == player || hit.transform.IsChildOf(player) || hit.GetComponentInParent<EnemyControl>() != null ||
-                        hit.GetComponentInParent<MonsterAI>() != null || hit is TerrainCollider) continue;
-                    if (hit.bounds.max.y > point.y + .3f) blocked = true;
+                    Collider obstacle = hits[c];
+                    if (obstacle.transform == player || obstacle.transform.IsChildOf(player) || obstacle.GetComponentInParent<EnemyControl>() != null ||
+                        obstacle.GetComponentInParent<MonsterAI>() != null || obstacle is TerrainCollider) continue;
+                    if (obstacle.bounds.max.y > sample.y + .3f) blocked = true;
                 }
-                data.walkable[i] = blocked ? 0 : 1;
+                mapData.walkable[i] = blocked ? 0 : 1;
             }
-            if (i % 100 == 0) { progress?.Invoke((float)i / data.walkable.Length); yield return null; }
+            if (i % 100 == 0) { progress?.Invoke((float)i / mapData.walkable.Length); yield return null; }
         }
-        data.spawn = data.Index(player.position.x, player.position.z);
-        done(data);
+        mapData.spawn = mapData.Index(player.position.x, player.position.z);
+        done(mapData);
     }
 }

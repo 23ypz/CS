@@ -4,33 +4,27 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-/// <summary>
-/// The single entry point for choosing local or online play. The UI is built at
-/// runtime so the existing Player prefab, including its AudioSource, remains the
-/// source of truth and is never replaced by a menu prefab.
-/// </summary>
+/* 单机和联机共用的菜单入口。界面运行时创建，不替换原 Player。 */
 public class GameModeManager : MonoBehaviour
 {
     private static GameModeManager instance;
     private enum ScreenState { ModeSelect, SinglePlayer, Multiplayer, Lobby, Gameplay, Pause, PauseSettings }
 
-    [Header("Network defaults")]
+    [Header("联机默认设置")]
     public string defaultServerAddress = "127.0.0.1";
     public int defaultServerPort = 9000;
 
-    private ScreenState state = ScreenState.ModeSelect;
+    private ScreenState state = ScreenState.ModeSelect; // 当前菜单或游戏状态
     private Canvas canvas;
     private Font uiFont;
     private GameObject content;
     private MonsterModeManager monsterMode;
     private NetworkClient networkClient;
-    // Monster settings are deliberately text fields in both game modes.  The
-    // host sends the multiplayer values to the authoritative server when the
-    // room starts; single-player passes the same values to MonsterModeManager.
+    // 两种模式均用输入框设置怪物参数，联机由房主发送给服务器。
     private InputField monsterCountInput;
     private InputField monsterHealthInput;
-    private int selectedMonsterCount = 5;
-    private int selectedMonsterHealth = 10;
+    private int selectedMonsterCount = 5; // 本次选择的怪物数量
+    private int selectedMonsterHealth = 10; // 本次选择的怪物血量
     private Text settingsStatusText;
     private InputField addressField;
     private InputField portField;
@@ -81,6 +75,7 @@ public class GameModeManager : MonoBehaviour
 
     private void Start()
     {
+        /* 先找到场景对象，再搭建菜单，避免初始化顺序影响原 Player。 */
         monsterMode = FindObjectOfType<MonsterModeManager>();
         if (monsterMode != null)
             monsterMode.SuppressLegacyMenu();
@@ -95,6 +90,7 @@ public class GameModeManager : MonoBehaviour
 
     private void Update()
     {
+        /* 网络消息放在菜单更新前处理，保证 HUD 能及时拿到快照。 */
         if (networkClient != null)
             networkClient.Tick();
 
@@ -110,16 +106,14 @@ public class GameModeManager : MonoBehaviour
             return;
         }
 
-        // PlayerControl historically locks the cursor in Awake. Keep the menu
-        // interaction state authoritative while any setup screen is visible.
+        // 设置界面显示时保持菜单光标状态，覆盖 PlayerControl 的锁定。
         if (canvas != null && canvas.enabled)
         {
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
         }
 
-        // Fallback for scenes opened with an incomplete/disabled EventSystem.
-        // The normal Button event still handles clicks when available.
+        // EventSystem 不完整时使用备用点击检测。
         if (canvas != null && canvas.enabled && state == ScreenState.ModeSelect &&
             Input.GetMouseButtonDown(0) && handledClickFrame != Time.frameCount)
         {
@@ -167,6 +161,7 @@ public class GameModeManager : MonoBehaviour
 
     private void BuildCanvas()
     {
+        /* 菜单采用屏幕坐标，和游戏场景的 Canvas 相互独立。 */
         GameObject canvasObject = new GameObject("GameModeCanvas");
         canvasObject.transform.SetParent(transform, false);
         canvas = canvasObject.AddComponent<Canvas>();
@@ -177,9 +172,7 @@ public class GameModeManager : MonoBehaviour
         scaler.referenceResolution = new Vector2(1280f, 720f);
         scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.Expand;
         canvasObject.AddComponent<GraphicRaycaster>();
-        // Prefer a CJK-capable font so Chinese labels remain legible on the
-        // development image as well as typical Windows installations. Unity
-        // selects the first installed font from this fallback list.
+        // 优先使用中文字体，Unity 会选择列表中首个已安装字体。
         uiFont = Font.CreateDynamicFontFromOSFont(
             new[] { "Noto Sans SC", "Microsoft YaHei", "SimHei", "Arial" }, 32);
         if (uiFont == null)
@@ -347,8 +340,7 @@ public class GameModeManager : MonoBehaviour
 
     private void StartNetworkGame(int count, int health)
     {
-        // The server is authoritative.  Echo its clamped values into the local
-        // manager so any HUD/minimap can use the same round settings.
+        // 同步服务器参数，保证本地 HUD 和小地图使用相同设置。
         selectedMonsterCount = Mathf.Clamp(count, 1, 20);
         selectedMonsterHealth = Mathf.Clamp(health, 1, 100);
         state = ScreenState.Gameplay;
@@ -368,7 +360,6 @@ public class GameModeManager : MonoBehaviour
         if (networkClient != null)
         {
             networkClient.Disconnect();
-        
             Destroy(networkClient);
             networkClient = null;
         }
@@ -381,8 +372,7 @@ public class GameModeManager : MonoBehaviour
     private void ShowPauseMenu()
     {
         state = ScreenState.Pause;
-        // Discard the mouse delta that opened the menu. This prevents one
-        // frame of look input from rotating the background camera.
+        // 清除打开菜单时的鼠标增量，避免背景镜头转动。
         Input.ResetInputAxes();
         if (networkClient != null)
             networkClient.SetPaused(true);
@@ -457,8 +447,7 @@ public class GameModeManager : MonoBehaviour
         PlayerControl[] players = FindObjectsOfType<PlayerControl>();
         for (int i = 0; i < players.Length; i++)
         {
-            // PlayerControl is disabled while the pause overlay is open, but
-            // the setting must take effect immediately when gameplay resumes.
+            // 暂停时 PlayerControl 被禁用，恢复游戏后立即使用新设置。
             if (players[i] != null)
             {
                 players[i].xScensitivity = x;
@@ -620,6 +609,7 @@ public class GameModeManager : MonoBehaviour
 
     private bool TryReadMonsterSettings(out int count, out int health)
     {
+        /* 输入框只负责收集文本，最终数值在这里统一限幅。 */
         count = selectedMonsterCount;
         health = selectedMonsterHealth;
 
@@ -682,8 +672,7 @@ public class GameModeManager : MonoBehaviour
         textRect.offsetMin = new Vector2(14f, 0f);
         textRect.offsetMax = new Vector2(-14f, 0f);
         input.textComponent = text;
-        // Assign after wiring the text component so the initial value is
-        // rendered immediately, even before the first focus/update event.
+        // 绑定文本组件后再赋初值，确保首次显示正确。
         input.text = value;
         return input;
     }

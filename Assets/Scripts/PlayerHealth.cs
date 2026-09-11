@@ -1,6 +1,6 @@
 using UnityEngine;
 
-/// <summary>Local player health, damage and the short death/respawn state.</summary>
+/* 玩家生命、受伤及死亡复活状态。 */
 public sealed class PlayerHealth : MonoBehaviour
 {
     [Min(1f)] public float maxHealth = 100f;
@@ -23,8 +23,8 @@ public sealed class PlayerHealth : MonoBehaviour
         }
     }
 
-    private float respawnRemaining;
-    private Vector3 deathPosition;
+    private float respawnRemaining; // 复活剩余秒数
+    private Vector3 deathPosition; // 死亡时固定位置
     private Camera deathCamera;
     private Vector3 cameraLocalPosition;
     private Quaternion cameraLocalRotation;
@@ -35,7 +35,7 @@ public sealed class PlayerHealth : MonoBehaviour
     private RecoilControl recoil;
     private Collider playerCollider;
     private float rootToGroundOffset;
-    private bool serverAuthoritative;
+    private bool serverAuthoritative; // 联机生命状态由服务器决定
     private bool originalBodyKinematic;
     private bool originalUseGravity;
 
@@ -65,8 +65,7 @@ public sealed class PlayerHealth : MonoBehaviour
         playerCollider = GetComponent<Collider>();
         if (playerCollider != null)
         {
-            // Keep the same root-to-feet offset when moving to a new ground
-            // position. This avoids putting the feet below a sloped floor.
+            // 保持根节点到脚底的偏移，避免斜坡上脚部下沉。
             rootToGroundOffset = transform.position.y - playerCollider.bounds.min.y;
             if (rootToGroundOffset < 0f) rootToGroundOffset = 0f;
         }
@@ -86,13 +85,13 @@ public sealed class PlayerHealth : MonoBehaviour
         if (CurrentHealth <= 0f) Die();
     }
 
-    /// <summary>Apply the server-authoritative state used by multiplayer.</summary>
+    /* 应用多人服务器权威状态。 */
     public void ApplyAuthoritativeState(int health, int maximum, bool dead, float remaining)
     {
         ApplyAuthoritativeState(health, maximum, dead, remaining, transform.position);
     }
 
-    /// <summary>The supplied position is chosen by the server, including on respawn.</summary>
+    /* 位置由服务器提供，包含复活位置。 */
     public void ApplyAuthoritativeState(int health, int maximum, bool dead, float remaining,
         Vector3 authoritativePosition)
     {
@@ -114,7 +113,7 @@ public sealed class PlayerHealth : MonoBehaviour
             RestoreAliveState(authoritativePosition, true, false);
     }
 
-    /// <summary>Clear a previous life/session without choosing a new spawn position.</summary>
+    /* 清理上一局状态，不重新选择出生点。 */
     public void ResetForNewMatch()
     {
         NetworkClient client = NetworkClient.Active;
@@ -122,12 +121,13 @@ public sealed class PlayerHealth : MonoBehaviour
         maxHealth = Mathf.Max(1f, maxHealth);
         CurrentHealth = maxHealth;
         RestoreAliveState(transform.position, serverAuthoritative, true);
-        // The mode manager controls whether input is enabled after this reset.
+        // 是否启用输入由模式管理器决定。
         if (controller != null) controller.enabled = true;
     }
 
     private void Die()
     {
+        // 固定死亡位置，冻结角色、武器、动画和镜头初始姿态。
         if (IsDead) return;
         IsDead = true;
         respawnRemaining = Mathf.Max(0.1f, respawnDuration);
@@ -157,17 +157,16 @@ public sealed class PlayerHealth : MonoBehaviour
 
     private void Update()
     {
+        // 死亡期间保持位置，并逐步放倒镜头。
         if (!IsDead) return;
         transform.position = deathPosition;
-        // Local pause stops a local life timer. Multiplayer can display its
-        // remaining time while paused, but only a server snapshot revives it.
+        // 多人只显示倒计时，复活必须等待服务器快照。
         float deltaTime = UsesServerAuthority ? Time.unscaledDeltaTime : Time.deltaTime;
         respawnRemaining = Mathf.Max(0f, respawnRemaining - deltaTime);
         if (deathCamera != null)
         {
             float t = RespawnProgress;
-            // Roll/pitch the view down over the two-second death window while
-            // keeping the camera anchored at the death location.
+            // 两秒内逐渐下俯镜头，并固定在死亡位置。
             deathCamera.transform.localPosition = cameraLocalPosition + Vector3.down * (0.25f * t);
             deathCamera.transform.localRotation = cameraLocalRotation *
                 Quaternion.Euler(72f * t, 0f, 0f);
@@ -177,6 +176,7 @@ public sealed class PlayerHealth : MonoBehaviour
 
     private void Respawn()
     {
+        // 在死亡点附近寻找安全位置，失败时才回退原点。
         Vector3 respawnPosition;
         if (!TryFindRespawnPosition(deathPosition, out respawnPosition))
             respawnPosition = deathPosition;
@@ -187,6 +187,7 @@ public sealed class PlayerHealth : MonoBehaviour
 
     private void RestoreAliveState(Vector3 position, bool network, bool resetAmmo)
     {
+        // 恢复移动、武器、后坐力、动画和镜头状态。
         IsDead = false;
         respawnRemaining = 0f;
         transform.position = position;
@@ -204,7 +205,7 @@ public sealed class PlayerHealth : MonoBehaviour
         if (weapon != null)
         {
             if (resetAmmo) weapon.ResetAmmo();
-            // A server respawn can arrive while the pause/menu UI is open.
+            // 菜单打开时收到服务器复活也保持武器关闭。
             weapon.enabled = !GameModeManager.IsGameplayPaused && !GameModeManager.IsMenuVisible;
         }
         if (recoil != null) recoil.enabled = true;
@@ -216,12 +217,7 @@ public sealed class PlayerHealth : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Finds a random walkable point around the death location. A ground ray
-    /// and a small occupancy test keep the player out of walls, monsters and
-    /// other solid geometry. Falling back to the death point preserves play
-    /// on scenes that do not expose a Ground layer.
-    /// </summary>
+    /* 在死亡点周围寻找随机可行走位置，避开墙体和怪物。 */
     private bool TryFindRespawnPosition(Vector3 origin, out Vector3 result)
     {
         float minRadius = Mathf.Max(0f, respawnRadiusMin);
@@ -272,8 +268,7 @@ public sealed class PlayerHealth : MonoBehaviour
             }
         }
 
-        // Terrain may not have been assigned to a Ground layer. Sample it as
-        // a fallback so the random respawn still works on the city terrain.
+        // 地形未设 Ground 层时使用 Terrain 采样。
         if (!found && Terrain.activeTerrain != null)
         {
             Terrain terrain = Terrain.activeTerrain;
@@ -291,7 +286,8 @@ public sealed class PlayerHealth : MonoBehaviour
 
     private bool IsRespawnAreaClear(Vector3 position)
     {
-        // Use the current collider footprint as a conservative clearance test.
+        // 用玩家胶囊体检查墙体、道具、玩家和怪物重叠。
+        // 使用玩家碰撞体范围做保守检测。
         float radius = 0.55f;
         if (playerCollider != null)
         {
@@ -307,14 +303,12 @@ public sealed class PlayerHealth : MonoBehaviour
             Collider other = overlaps[i];
             if (other == null || other == playerCollider ||
                 other.transform == transform || other.transform.IsChildOf(transform)) continue;
-            // The clearance capsule can overlap the floor when the player
-            // root is close to its feet. That is expected, not an obstacle.
+            // 胶囊体与脚下地面重叠属于正常情况。
             if (other is TerrainCollider || other.gameObject.layer == LayerMask.NameToLayer("Ground"))
                 continue;
-            // Monsters are dynamic hazards; avoid spawning directly inside one.
+            // 避免生成在怪物内部。
             if (other.GetComponentInParent<EnemyControl>() != null) return false;
-            // Ground underneath does not intersect the raised capsule. Any
-            // other collider indicates a wall, prop, or another player.
+            // 其他碰撞体视为墙体、道具或玩家。
             return false;
         }
         return true;

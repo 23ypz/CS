@@ -4,24 +4,17 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Runtime gameplay HUD shared by the local and network game modes.
-///
-/// The scene does not need a hand-authored Canvas for this component.  A small
-/// canvas is created once at load time so that the existing Player prefab (and
-/// its AudioSource) remains untouched.  The map is deliberately camera
-/// independent: it is a top-down, north-up view centred on the local player.
-/// </summary>
+/* 单机和联机共用 HUD。Canvas 动态创建，小地图以本地玩家为中心。 */
 public sealed class GameplayHud : MonoBehaviour
 {
     private static GameplayHud instance;
 
-    [Header("Minimap")]
-    [Tooltip("World-space radius represented by the edge of the minimap.")]
+    [Header("小地图")]
+    [Tooltip("小地图显示的实际场景半径。")]
     public float minimapWorldRadius = 45f;
     public int minimapPixelSize = 224;
 
-    [Header("Colours")]
+    [Header("标记颜色")]
     public Color minimapBackground = new Color(0.025f, 0.045f, 0.07f, 0.88f);
     public Color localPlayerColor = new Color(0.18f, 1f, 0.35f, 1f);
     public Color teammateColor = new Color(0.25f, 0.60f, 1f, 1f);
@@ -58,9 +51,7 @@ public sealed class GameplayHud : MonoBehaviour
     private NetScore[] latestScores = new NetScore[0];
     private bool roundStarted;
 
-    // A Transform is stable for the lifetime of a spawned network view and is
-    // available even though NetworkClient intentionally exposes only the view
-    // enumerables (not its private numeric dictionaries).
+    // 网络视图的 Transform 生命周期稳定，适合保存标记。
     private readonly Dictionary<Transform, Image> teammateMarkers =
         new Dictionary<Transform, Image>();
     private readonly Dictionary<Transform, Image> monsterMarkers =
@@ -68,8 +59,8 @@ public sealed class GameplayHud : MonoBehaviour
     private readonly HashSet<Transform> seenTeammates = new HashSet<Transform>();
     private readonly HashSet<Transform> seenMonsters = new HashSet<Transform>();
 
-    private float referenceRefreshClock;
-    private float singlePlayerScanClock;
+    private float referenceRefreshClock; // 场景引用刷新间隔计时。
+    private float singlePlayerScanClock; // 单机怪物标记扫描计时。
     private bool networkHealthKnown;
     private float networkHealth = 100f;
     private float networkMaxHealth = 100f;
@@ -128,8 +119,8 @@ public sealed class GameplayHud : MonoBehaviour
 
     private void Update()
     {
-        // References can be missing during a scene transition, and the local
-        // Player may be instantiated after this persistent HUD object.
+        /* 场景切换后对象可能晚一帧生成，定时重新查找引用。 */
+        // 场景切换时引用可能暂时为空，Player 也可能稍后生成。
         referenceRefreshClock -= Time.unscaledDeltaTime;
         if (referenceRefreshClock <= 0f)
         {
@@ -137,20 +128,18 @@ public sealed class GameplayHud : MonoBehaviour
             FindGameplayReferences();
         }
 
-        NetworkClient activeClient = NetworkClient.Active;
-        SubscribeToClient(activeClient);
+        NetworkClient client = NetworkClient.Active;
+        SubscribeToClient(client);
 
-        // GameStarted can arrive shortly before the map upload is echoed back.
-        // Keep the HUD visible for the whole round once that transition occurs.
-        bool networkPlaying = activeClient != null &&
-            (activeClient.IsGameStarted || roundStarted);
-        bool singlePlaying = monsterMode != null && monsterMode.IsPlaying && !networkPlaying;
-        bool gameplayVisible = networkPlaying || singlePlaying;
+        // 开局消息可能早于地图回传；开局后保持 HUD 可见。
+        bool online = client != null && (client.IsGameStarted || roundStarted);
+        bool solo = monsterMode != null && monsterMode.IsPlaying && !online;
+        bool show = online || solo;
 
         if (canvas != null)
-            canvas.enabled = gameplayVisible;
+            canvas.enabled = show;
 
-        if (!gameplayVisible)
+        if (!show)
         {
             ClearMarkers(teammateMarkers);
             ClearMarkers(monsterMarkers);
@@ -158,15 +147,16 @@ public sealed class GameplayHud : MonoBehaviour
             return;
         }
 
-        UpdateMinimap(networkPlaying, activeClient);
-        UpdateLeaderboard(networkPlaying);
-        UpdatePlayerHealth(networkPlaying);
+        UpdateMinimap(online, client);
+        UpdateLeaderboard(online);
+        UpdatePlayerHealth(online);
         UpdateAmmoHud(true);
-        UpdateWaveHud(networkPlaying, activeClient);
+        UpdateWaveHud(online, client);
     }
 
     private void FindGameplayReferences()
     {
+        /* 只保存 Transform，不复制 Player，避免破坏原有组件和声音。 */
         if (localPlayer == null)
         {
             GameObject playerObject = GameObject.FindGameObjectWithTag("Player");
@@ -177,9 +167,7 @@ public sealed class GameplayHud : MonoBehaviour
         if (monsterMode == null)
             monsterMode = FindObjectOfType<MonsterModeManager>();
 
-        // A scene can contain a newly loaded manager after returning to menu.
-        // If the old reference was destroyed, FindObjectOfType above will pick
-        // it up on the next refresh.
+        // 返回菜单后可能生成新的管理器，下次刷新会重新查找。
         if (localPlayer == null)
         {
             GameObject playerObject = GameObject.FindGameObjectWithTag("Player");
@@ -237,6 +225,7 @@ public sealed class GameplayHud : MonoBehaviour
 
     private void BuildCanvas()
     {
+        /* HUD 使用独立 Canvas，便于菜单暂停时整体隐藏。 */
         GameObject canvasObject = new GameObject("GameplayHudCanvas");
         canvasObject.transform.SetParent(transform, false);
 
@@ -249,8 +238,7 @@ public sealed class GameplayHud : MonoBehaviour
         scaler.referenceResolution = new Vector2(1280f, 720f);
         scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.Expand;
 
-        // Use a CJK-capable fallback list; the HUD must not render Chinese
-        // labels as missing-glyph boxes on systems without Microsoft YaHei.
+        // 使用支持中文的字体回退，避免中文显示为空框。
         uiFont = Font.CreateDynamicFontFromOSFont(
             new[] { "Noto Sans SC", "Microsoft YaHei", "SimHei", "Arial" }, 28);
         if (uiFont == null)
@@ -277,8 +265,7 @@ public sealed class GameplayHud : MonoBehaviour
         Image panel = root.AddComponent<Image>(); panel.color = new Color(0.025f, 0.045f, 0.07f, 0.88f); panel.raycastTarget = false;
         GameObject fillObject = new GameObject("HealthFill"); fillObject.transform.SetParent(root.transform, false);
         healthFill = fillObject.AddComponent<Image>(); healthFill.color = new Color(0.18f, 0.9f, 0.25f, 1f);
-        // Keep the fill left anchored and resize its width in UpdatePlayerHealth.
-        // This remains visibly shorter with the default (sprite-less) UI Image.
+        // 左锚点填充条由 UpdatePlayerHealth 按比例缩放宽度。
         healthFill.type = Image.Type.Simple;
         RectTransform fillRect = healthFill.rectTransform;
         fillRect.anchorMin = new Vector2(0f, 0.5f); fillRect.anchorMax = new Vector2(0f, 0.5f);
@@ -346,8 +333,7 @@ public sealed class GameplayHud : MonoBehaviour
         waveWarningRoot.gameObject.SetActive(warn);
         if (warn)
         {
-            // Keep the last second visible while awaiting the next server
-            // snapshot; the client must not invent a wave spawn on its own.
+            // 等待服务器快照时保留最后一秒，客户端不自行生成波次。
             int seconds = Mathf.Max(1, Mathf.CeilToInt(remaining));
             waveWarningLabel.text = "第 " + next + " 波怪物来袭 · " + seconds + " 秒";
         }
@@ -373,9 +359,7 @@ public sealed class GameplayHud : MonoBehaviour
         Image actionPanel = action.AddComponent<Image>(); actionPanel.color = new Color(0.02f, 0.02f, 0.02f, 0.82f); actionPanel.raycastTarget = false;
         GameObject fill = new GameObject("AmmoActionFill"); fill.transform.SetParent(action.transform, false);
         ammoActionFill = fill.AddComponent<Image>(); ammoActionFill.color = new Color(0.25f, 0.68f, 1f, 1f); ammoActionFill.type = Image.Type.Simple;
-        // A sprite-less Filled Image renders as a full rectangle in Unity.
-        // Resize a left-anchored Simple Image instead so progress is always
-        // visibly reduced as the action advances.
+        // 使用左锚点 Simple Image 缩放宽度，确保进度可见。
         RectTransform fillRect = ammoActionFill.rectTransform; fillRect.anchorMin = new Vector2(0f, 0f); fillRect.anchorMax = new Vector2(0f, 0f); fillRect.pivot = new Vector2(0f, 0f); fillRect.anchoredPosition = new Vector2(12f, 8f); fillRect.sizeDelta = new Vector2(396f, 16f);
         ammoActionLabel = CreateText("", 22, Color.white, TextAnchor.MiddleCenter); ammoActionLabel.transform.SetParent(action.transform, false);
         RectTransform actionLabel = ammoActionLabel.rectTransform; actionLabel.anchorMin = Vector2.zero; actionLabel.anchorMax = Vector2.one; actionLabel.offsetMin = new Vector2(8f, 20f); actionLabel.offsetMax = new Vector2(-8f, -2f);
@@ -445,8 +429,7 @@ public sealed class GameplayHud : MonoBehaviour
         if (healthLabel != null)
             healthLabel.text = "生命值 " + Mathf.CeilToInt(current) + " / " + Mathf.CeilToInt(maximum);
 
-        // Use escaped Unicode so the source remains robust across editor
-        // code pages while still presenting readable Chinese in-game.
+        // 使用转义 Unicode，兼容不同编辑器编码。
         if (healthLabel != null)
             healthLabel.text = "\u751f\u547d\u503c " + Mathf.CeilToInt(current) + " / " + Mathf.CeilToInt(maximum);
         if (respawnRoot != null) respawnRoot.gameObject.SetActive(dead);
@@ -482,8 +465,7 @@ public sealed class GameplayHud : MonoBehaviour
         background.color = minimapBackground;
         background.raycastTarget = false;
 
-        // Clip marker children to the circular silhouette so edge markers can
-        // never leak into the four corners of the minimap rectangle.
+        // 裁剪标记到圆形小地图内，避免溢出矩形角落。
         Mask circularMask = root.AddComponent<Mask>();
         circularMask.showMaskGraphic = true;
 
@@ -515,8 +497,7 @@ public sealed class GameplayHud : MonoBehaviour
         leaderboardRoot.anchorMin = new Vector2(0f, 0.5f);
         leaderboardRoot.anchorMax = new Vector2(0f, 0.5f);
         leaderboardRoot.pivot = new Vector2(0f, 0.5f);
-        // The panel is intentionally below the minimap and in the left-middle
-        // area so it remains readable without covering the crosshair.
+        // 排行榜放在小地图下方左侧，避免遮挡准星。
         leaderboardRoot.anchoredPosition = new Vector2(24f, -120f);
         leaderboardRoot.sizeDelta = new Vector2(270f, 206f);
 
@@ -581,6 +562,7 @@ public sealed class GameplayHud : MonoBehaviour
 
     private void UpdateMinimap(bool networkPlaying, NetworkClient client)
     {
+        /* 先维护标记集合，再把世界坐标映射到圆形区域。 */
         if (localPlayer == null || mapRoot == null)
         {
             if (localMarker != null)
@@ -597,8 +579,7 @@ public sealed class GameplayHud : MonoBehaviour
 
         localMarker.enabled = true;
         localMarker.rectTransform.anchoredPosition = Vector2.zero;
-        // A triangle sprite points up at yaw 0 (+Z).  UI's positive Z
-        // rotation turns up toward the left, hence the negative yaw.
+        // 三角形默认朝 +Z，UI 旋转方向相反，所以使用负 yaw。
         localMarker.rectTransform.localEulerAngles = new Vector3(0f, 0f, -localPlayer.eulerAngles.y);
 
         if (networkPlaying && client != null)
@@ -651,10 +632,7 @@ public sealed class GameplayHud : MonoBehaviour
         }
         else
         {
-            // In local mode Enemy-tagged objects are the authoritative monster
-            // list.  The inactive template is naturally excluded by Unity.
-            // Refresh the discovery list a few times per second; marker
-            // positions themselves still update every frame.
+            // 单机使用 Enemy 标签查找怪物；模板未激活时会自动排除。
             singlePlayerScanClock -= Time.unscaledDeltaTime;
             if (singlePlayerScanClock > 0f)
             {
@@ -686,8 +664,7 @@ public sealed class GameplayHud : MonoBehaviour
             ClearMarkers(teammateMarkers);
         }
 
-        // Keep the local-player arrow visible when markers overlap at the
-        // centre of the map.
+        // 本地箭头置于最上层，避免与其他标记重叠隐藏。
         localMarker.transform.SetAsLastSibling();
     }
 
@@ -712,6 +689,7 @@ public sealed class GameplayHud : MonoBehaviour
 
     private void UpdateLeaderboard(bool networkPlaying)
     {
+        /* 排行榜只接受服务器分数，客户端不自行计算击杀。 */
         if (leaderboardRoot == null)
             return;
         leaderboardRoot.gameObject.SetActive(networkPlaying);
@@ -740,9 +718,7 @@ public sealed class GameplayHud : MonoBehaviour
         {
             NetScore score = scores[i];
             string name = string.IsNullOrEmpty(score.name) ? ("玩家" + score.id) : score.name;
-            // The server accepts up to 16 characters, while this compact
-            // left-side panel is only 270 px wide. Keep each row inside the
-            // panel so long names never cover the play area.
+            // 面板宽度有限，截短过长昵称避免遮挡画面。
             if (name.Length > 8)
                 name = name.Substring(0, 8) + "…";
             text.Append(i + 1).Append("  ").Append(name).Append("  ")

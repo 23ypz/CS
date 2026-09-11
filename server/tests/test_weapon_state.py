@@ -1,4 +1,4 @@
-"""Run from the project root: python -m unittest discover -s server/tests -v."""
+"""在项目根目录运行：python -m unittest discover -s server/tests -v。"""
 import asyncio
 import json
 import sys
@@ -6,13 +6,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-# main.py supports positional CLI arguments; don't pass unittest's flags to it.
+# main.py 接收位置参数，避免传入 unittest 的选项。
 with patch.object(sys, "argv", ["server/main.py"]):
     from server import main as game
 
 
 class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # 测试阶段：固定单调时钟，令射速和换弹边界可重复验证。
         self.now = Mock(return_value=100.0)
         self.clock = patch.object(game, "time", SimpleNamespace(monotonic=self.now))
         self.clock.start()
@@ -26,10 +27,12 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
         self.sequence = 0
 
     def command(self, **values):
+        # 每个武器包递增序号，并携带当前生命代次。
         self.sequence += 1
         return dict(weaponSeq=self.sequence, life=self.player.life, **values)
 
     async def shoot(self):
+        # 使用统一方向构造最小射击包。
         await self.server.handle_shoot(self.player, self.command(dx=0, dy=0, dz=1))
 
     def action(self, action):
@@ -67,8 +70,7 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
         for index in range(100):
             self.now.return_value = 100 + index * .02
             await self.shoot()
-        # At most 21 shots in 1.98 seconds including the initial shot and the
-        # one-tick jitter allowance, not a shot per 0.02s input message.
+        # 计入首发与一帧抖动容差，1.98 秒内最多 21 发。
         self.assertGreaterEqual(self.player.magazine, 29)
 
     async def test_ten_rounds_per_second_without_releasing_trigger(self):
@@ -186,6 +188,7 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
         self.assert_ammo(49, 200)
 
     async def test_snapshot_includes_ack_life_and_remaining_action_time(self):
+        # 快照阶段同时检查序号确认、生命代次和动作剩余时间。
         self.player.magazine = 12
         self.action("reload")
         self.player.address = ("127.0.0.1", 12345)
@@ -217,9 +220,7 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
         self.assert_ammo(50, 200)
 
     async def test_edge_target_is_not_rejected_by_navigation_height_check(self):
-        # A walkability map with a steep last cell reproduces the old bug:
-        # can_move_segment rejected the shot because its floor differed from
-        # the shooter's, although there is no blocked cell between them.
+        # 末格较高但中途无遮挡，复现旧移动判定误拒绝射击的问题。
         self.server.map_data = {
             "width": 3, "depth": 1, "originX": 0.0, "originZ": 0.0,
             "cell": 1.0, "walkable": [1, 1, 1],
@@ -229,11 +230,35 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
         self.server.monsters[1] = game.Monster(1, 2.0, 8.0, 0.0, hp=2)
         self.assertFalse(self.server.can_move_segment(0, 0, 2, 0, 0, radius=0.0))
         self.assertTrue(self.server.can_shoot_segment(0, 0, 2, 0))
-        # Aim at the elevated target; the old navigation check rejected this
-        # solely because the target's floor was much higher.
+        # 瞄准高处目标，地面高度差不应导致射击被拒绝。
         await self.server.handle_shoot(self.player, self.command(dx=2, dy=8.7, dz=0))
         self.assertFalse(self.server.monsters)
         self.assertEqual(self.player.score, 10)
+
+    async def test_monster_segment_follows_local_ground_on_slope(self):
+        self.server.map_data = {
+            "width": 4, "depth": 1, "originX": 0.0, "originZ": 0.0,
+            "cell": 1.0, "walkable": [1, 1, 1, 1],
+            "heights": [0.0, 0.6, 1.2, 1.8]
+        }
+        self.assertFalse(self.server.can_move_segment(0, 0, 3, 0, 0, radius=0.0))
+        self.assertTrue(self.server.can_monster_segment(0, 0, 3, 0, 0, radius=0.0))
+
+    async def test_monster_can_leave_finite_collision_map_boundary(self):
+        self.server.map_data = {
+            "width": 3, "depth": 1, "originX": 0.0, "originZ": 0.0,
+            "cell": 1.0, "walkable": [1, 1, 1],
+            "heights": [0.0, 0.0, 0.0]
+        }
+        self.assertTrue(self.server.can_monster_segment(2, 0, 5, 0, 0, radius=0.0))
+
+    async def test_steep_nonwalkable_terrain_does_not_hide_monster(self):
+        self.server.map_data = {
+            "width": 3, "depth": 1, "originX": 0.0, "originZ": 0.0,
+            "cell": 1.0, "walkable": [1, 0, 1],
+            "heights": [0.0, 1.0, 2.0]
+        }
+        self.assertTrue(self.server.can_shoot_segment(0, 0, 2, 0))
 
     async def test_blocked_cell_still_blocks_projectile(self):
         self.server.map_data = {
@@ -266,6 +291,7 @@ class WeaponStateTests(unittest.IsolatedAsyncioTestCase):
 
 class WeaponTcpTests(unittest.IsolatedAsyncioTestCase):
     async def test_wire_command_order_and_protocol_version(self):
+        # TCP 阶段：验证 hello 版本和连续武器命令的服务端确认顺序。
         server = game.GameServer()
         tcp = await asyncio.start_server(server.handle_tcp, "127.0.0.1", 0)
         reader, writer = await asyncio.open_connection("127.0.0.1", tcp.sockets[0].getsockname()[1])
@@ -278,7 +304,7 @@ class WeaponTcpTests(unittest.IsolatedAsyncioTestCase):
             server.started = True
             server.reset_player_ammo(player)
             player.magazine = 10
-            # One TCP write emulates a quick tap: start, cancel, reload.
+            # 一次 TCP 写入模拟短按：开始、取消、换弹。
             for seq, action in enumerate(("resupply_start", "resupply_cancel", "reload"), 1):
                 packet = {"type": "ammo_action", "weaponSeq": seq, "life": player.life, "action": action}
                 writer.write((json.dumps(packet) + "\n").encode())
