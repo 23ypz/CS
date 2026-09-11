@@ -32,8 +32,16 @@ public class MonsterModeManager : MonoBehaviour
     private bool finished;
     private bool controlledByGameModeManager;
     private bool networkControlled;
+    private string legacyCountInput = "5";
+    private string legacyHealthInput = "10";
+    private string legacySettingsMessage = string.Empty;
+    private MonsterWaveSequence waveSequence;
 
     public bool IsPlaying { get { return playing; } }
+    public int CurrentWave { get { return waveSequence != null ? waveSequence.CurrentWave : 0; } }
+    public int NextWave { get { return waveSequence != null ? waveSequence.NextWave : 0; } }
+    public float WaveRemaining { get { return waveSequence != null ? waveSequence.RemainingSeconds : 0f; } }
+    public bool WavesComplete { get { return finished; } }
 
     private void Start()
     {
@@ -58,6 +66,9 @@ public class MonsterModeManager : MonoBehaviour
 
         if (monsterPrefab == null)
             monsterPrefab = sceneEnemyTemplate;
+
+        legacyCountInput = monsterCount.ToString();
+        legacyHealthInput = monsterHealth.ToString();
 
         // Keep the original scene enemy as an inactive template. It will not attack
         // or appear before the player confirms the mode settings.
@@ -109,6 +120,7 @@ public class MonsterModeManager : MonoBehaviour
     public void StartNetworkMode()
     {
         networkControlled = true;
+        waveSequence = null;
         playing = true;
         finished = false;
         Time.timeScale = 1f;
@@ -134,8 +146,16 @@ public class MonsterModeManager : MonoBehaviour
         if (networkControlled || !playing || finished)
             return;
 
+        // Spawn on a fixed schedule even if earlier monsters are still alive.
+        // Scaled time intentionally stops the single-player schedule on pause.
+        waveSequence.Advance(Time.deltaTime);
+        MonsterWaveSequence.Stats stats;
+        while (waveSequence.TryBeginNextWave(out stats))
+            SpawnWave(stats);
+        monsters.RemoveAll(monster => monster == null);
+
         int alive = CountAliveMonsters();
-        if (alive == 0)
+        if (CurrentWave == MonsterWaveSequence.TotalWaves && alive == 0)
         {
             finished = true;
             Cursor.lockState = CursorLockMode.None;
@@ -166,9 +186,26 @@ public class MonsterModeManager : MonoBehaviour
 
         monsterCount = Mathf.Clamp(monsterCount, 1, 20);
         monsterHealth = Mathf.Clamp(monsterHealth, 1, 100);
-        monsters.Clear();
+        ClearMonsters();
+        finished = false;
+        waveSequence = new MonsterWaveSequence(monsterCount, monsterHealth, monsterSpeed);
+        MonsterWaveSequence.Stats firstWave;
+        if (waveSequence.TryBeginNextWave(out firstWave))
+            SpawnWave(firstWave);
 
-        for (int i = 0; i < monsterCount; i++)
+        playing = true;
+        Time.timeScale = 1f;
+        if (playerControl != null)
+            playerControl.enabled = true;
+        if (weaponControl != null)
+            weaponControl.enabled = true;
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+    }
+
+    private void SpawnWave(MonsterWaveSequence.Stats stats)
+    {
+        for (int i = 0; i < stats.Count; i++)
         {
             Vector3 position;
             if (!TryGetSpawnPosition(i, out position))
@@ -186,13 +223,13 @@ public class MonsterModeManager : MonoBehaviour
                 ? Quaternion.LookRotation(lookDirection, Vector3.up)
                 : Quaternion.identity;
             GameObject monster = Instantiate(monsterPrefab, position, rotation);
-            monster.name = "Monster_" + (i + 1);
+            monster.name = "Monster_Wave" + stats.Wave + "_" + (i + 1);
             // Keep spawned instances discoverable by other gameplay systems that
             // use the Enemy tag, even though damage detection uses EnemyControl.
             monster.tag = "Enemy";
             monster.SetActive(true);
 
-            ConfigureMonster(monster);
+            ConfigureMonster(monster, stats);
             AlignMonsterToGround(monster, position.y);
 
             MonsterAI ai = monster.GetComponent<MonsterAI>();
@@ -202,17 +239,9 @@ public class MonsterModeManager : MonoBehaviour
             monsters.Add(monster);
         }
 
-        playing = true;
-        Time.timeScale = 1f;
-        if (playerControl != null)
-            playerControl.enabled = true;
-        if (weaponControl != null)
-            weaponControl.enabled = true;
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
     }
 
-    public void ReturnToMenu()
+    private void ClearMonsters()
     {
         for (int i = 0; i < monsters.Count; i++)
         {
@@ -220,13 +249,19 @@ public class MonsterModeManager : MonoBehaviour
                 Destroy(monsters[i]);
         }
         monsters.Clear();
+    }
+
+    public void ReturnToMenu()
+    {
+        ClearMonsters();
+        waveSequence = null;
         playing = false;
         finished = false;
         networkControlled = false;
         SetGameplayEnabled(false);
     }
 
-    private void ConfigureMonster(GameObject monster)
+    private void ConfigureMonster(GameObject monster, MonsterWaveSequence.Stats stats)
     {
         EnemyControl[] healthComponents = monster.GetComponentsInChildren<EnemyControl>(true);
         if (healthComponents.Length == 0)
@@ -234,7 +269,7 @@ public class MonsterModeManager : MonoBehaviour
 
         for (int i = 0; i < healthComponents.Length; i++)
         {
-            healthComponents[i].hp = monsterHealth;
+            healthComponents[i].hp = stats.Health;
             if (deathEffect != null)
                 healthComponents[i].bombEffect = deathEffect;
         }
@@ -268,7 +303,8 @@ public class MonsterModeManager : MonoBehaviour
         MonsterAI ai = monster.GetComponent<MonsterAI>();
         if (ai == null)
             ai = monster.AddComponent<MonsterAI>();
-        ai.Initialize(player, monsterSpeed, groundMask);
+        ai.Initialize(player, stats.Speed, groundMask);
+        ai.attackDamage = stats.Damage;
     }
 
     private bool TryGetSpawnPosition(int index, out Vector3 position)
@@ -408,22 +444,58 @@ public class MonsterModeManager : MonoBehaviour
         const float height = 260f;
         Rect panel = new Rect(Screen.width * 0.5f - width * 0.5f,
             Screen.height * 0.5f - height * 0.5f, width, height);
+
+        int previousTextFieldFontSize = GUI.skin != null && GUI.skin.textField != null
+            ? GUI.skin.textField.fontSize : 0;
+        int previousLabelFontSize = GUI.skin != null && GUI.skin.label != null
+            ? GUI.skin.label.fontSize : 0;
+        int previousButtonFontSize = GUI.skin != null && GUI.skin.button != null
+            ? GUI.skin.button.fontSize : 0;
+        int previousBoxFontSize = GUI.skin != null && GUI.skin.box != null
+            ? GUI.skin.box.fontSize : 0;
+        if (GUI.skin != null)
+        {
+            if (GUI.skin.textField != null) GUI.skin.textField.fontSize = 20;
+            if (GUI.skin.label != null) GUI.skin.label.fontSize = 20;
+            if (GUI.skin.button != null) GUI.skin.button.fontSize = 20;
+            if (GUI.skin.box != null) GUI.skin.box.fontSize = 22;
+        }
+
         GUI.Box(panel, "怪物模式");
 
-        GUI.Label(new Rect(panel.x + 30f, panel.y + 55f, 130f, 25f),
-            "怪物数量：" + monsterCount);
-        monsterCount = Mathf.RoundToInt(GUI.HorizontalSlider(
-            new Rect(panel.x + 150f, panel.y + 65f, 160f, 20f), monsterCount, 1f, 20f));
+        GUI.Label(new Rect(panel.x + 30f, panel.y + 50f, 130f, 30f), "怪物数量（1-20）");
+        legacyCountInput = GUI.TextField(new Rect(panel.x + 165f, panel.y + 48f, 145f, 34f), legacyCountInput);
+        GUI.Label(new Rect(panel.x + 30f, panel.y + 98f, 130f, 30f), "怪物血量（1-100）");
+        legacyHealthInput = GUI.TextField(new Rect(panel.x + 165f, panel.y + 96f, 145f, 34f), legacyHealthInput);
 
-        GUI.Label(new Rect(panel.x + 30f, panel.y + 105f, 130f, 25f),
-            "怪物血量：" + monsterHealth);
-        monsterHealth = Mathf.RoundToInt(GUI.HorizontalSlider(
-            new Rect(panel.x + 150f, panel.y + 115f, 160f, 20f), monsterHealth, 1f, 100f));
-
-        GUI.Label(new Rect(panel.x + 30f, panel.y + 150f, 300f, 25f),
+        GUI.Label(new Rect(panel.x + 30f, panel.y + 143f, 300f, 25f),
             "怪物会从玩家周围的地图边缘生成");
-        if (GUI.Button(new Rect(panel.x + 95f, panel.y + 190f, 170f, 40f), "开始游戏"))
-            StartMonsterMode();
+        if (!string.IsNullOrEmpty(legacySettingsMessage))
+            GUI.Label(new Rect(panel.x + 30f, panel.y + 166f, 300f, 25f), legacySettingsMessage);
+        if (GUI.Button(new Rect(panel.x + 95f, panel.y + 200f, 170f, 40f), "开始游戏"))
+        {
+            int count;
+            int health;
+            if (!int.TryParse(legacyCountInput, out count) || count < 1 || count > 20)
+                legacySettingsMessage = "数量必须是 1-20 的整数";
+            else if (!int.TryParse(legacyHealthInput, out health) || health < 1 || health > 100)
+                legacySettingsMessage = "血量必须是 1-100 的整数";
+            else
+            {
+                monsterCount = count;
+                monsterHealth = health;
+                legacySettingsMessage = string.Empty;
+                StartMonsterMode();
+            }
+        }
+
+        if (GUI.skin != null)
+        {
+            if (GUI.skin.textField != null) GUI.skin.textField.fontSize = previousTextFieldFontSize;
+            if (GUI.skin.label != null) GUI.skin.label.fontSize = previousLabelFontSize;
+            if (GUI.skin.button != null) GUI.skin.button.fontSize = previousButtonFontSize;
+            if (GUI.skin.box != null) GUI.skin.box.fontSize = previousBoxFontSize;
+        }
     }
 }
 

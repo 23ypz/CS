@@ -12,7 +12,7 @@ using UnityEngine.UI;
 public class GameModeManager : MonoBehaviour
 {
     private static GameModeManager instance;
-    private enum ScreenState { ModeSelect, SinglePlayer, Multiplayer, Lobby, Gameplay, Pause }
+    private enum ScreenState { ModeSelect, SinglePlayer, Multiplayer, Lobby, Gameplay, Pause, PauseSettings }
 
     [Header("Network defaults")]
     public string defaultServerAddress = "127.0.0.1";
@@ -24,8 +24,14 @@ public class GameModeManager : MonoBehaviour
     private GameObject content;
     private MonsterModeManager monsterMode;
     private NetworkClient networkClient;
-    private Slider monsterCountSlider;
-    private Slider monsterHealthSlider;
+    // Monster settings are deliberately text fields in both game modes.  The
+    // host sends the multiplayer values to the authoritative server when the
+    // room starts; single-player passes the same values to MonsterModeManager.
+    private InputField monsterCountInput;
+    private InputField monsterHealthInput;
+    private int selectedMonsterCount = 5;
+    private int selectedMonsterHealth = 10;
+    private Text settingsStatusText;
     private InputField addressField;
     private InputField portField;
     private InputField nameField;
@@ -35,6 +41,9 @@ public class GameModeManager : MonoBehaviour
     private Button hostStartButton;
     private Button singleModeButton;
     private Button multiplayerModeButton;
+    private InputField sensitivityXInput;
+    private InputField sensitivityYInput;
+    private Text pauseSettingsStatus;
     private int handledClickFrame = -1;
 
     public static bool IsMenuVisible
@@ -81,6 +90,7 @@ public class GameModeManager : MonoBehaviour
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
         ShowModeSelect();
+        Input.ResetInputAxes();
     }
 
     private void Update()
@@ -88,11 +98,13 @@ public class GameModeManager : MonoBehaviour
         if (networkClient != null)
             networkClient.Tick();
 
-        if ((state == ScreenState.Gameplay || state == ScreenState.Pause) &&
+        if ((state == ScreenState.Gameplay || state == ScreenState.Pause || state == ScreenState.PauseSettings) &&
             Input.GetKeyDown(KeyCode.Escape))
         {
             if (state == ScreenState.Pause)
                 ResumeGame();
+            else if (state == ScreenState.PauseSettings)
+                ShowPauseMenu();
             else
                 ShowPauseMenu();
             return;
@@ -165,10 +177,11 @@ public class GameModeManager : MonoBehaviour
         scaler.referenceResolution = new Vector2(1280f, 720f);
         scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.Expand;
         canvasObject.AddComponent<GraphicRaycaster>();
-        // Microsoft YaHei is available on Windows and has complete Chinese
-        // glyph coverage. The Arial fallback keeps the menu usable on other
-        // platforms without changing any Player assets.
-        uiFont = Font.CreateDynamicFontFromOSFont("Microsoft YaHei", 32);
+        // Prefer a CJK-capable font so Chinese labels remain legible on the
+        // development image as well as typical Windows installations. Unity
+        // selects the first installed font from this fallback list.
+        uiFont = Font.CreateDynamicFontFromOSFont(
+            new[] { "Noto Sans SC", "Microsoft YaHei", "SimHei", "Arial" }, 32);
         if (uiFont == null)
             uiFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
     }
@@ -199,7 +212,7 @@ public class GameModeManager : MonoBehaviour
         AddText("选择游戏模式", 24, new Vector2(0f, 125f), new Vector2(680f, 42f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
         singleModeButton = AddButton("单人怪物模式", new Vector2(0f, 45f), new Vector2(390f, 64f), ShowSinglePlayer, new Color(0.12f, 0.42f, 0.72f));
         multiplayerModeButton = AddButton("多人联机模式", new Vector2(0f, -45f), new Vector2(390f, 64f), ShowMultiplayer, new Color(0.18f, 0.58f, 0.42f));
-        AddText("多人模式最多支持 4 名玩家", 19, new Vector2(0f, -130f), new Vector2(680f, 36f), TextAnchor.MiddleCenter, new Color(0.6f, 0.66f, 0.75f));
+        AddText("多人模式最多支持 4 名玩家", 20, new Vector2(0f, -130f), new Vector2(680f, 36f), TextAnchor.MiddleCenter, new Color(0.6f, 0.66f, 0.75f));
     }
 
     private void ShowSinglePlayer()
@@ -212,12 +225,13 @@ public class GameModeManager : MonoBehaviour
         ClearContent();
         AddText("单人怪物模式", 32, new Vector2(0f, 205f), new Vector2(680f, 52f), TextAnchor.MiddleCenter, Color.white);
         AddText("调整参数后开始游戏", 21, new Vector2(0f, 160f), new Vector2(680f, 34f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
-        AddText("怪物数量", 22, new Vector2(-220f, 90f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
-        monsterCountSlider = AddSlider(new Vector2(80f, 100f), 1f, 20f, 5f);
-        AddText("怪物血量", 22, new Vector2(-220f, 10f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
-        monsterHealthSlider = AddSlider(new Vector2(80f, 20f), 1f, 100f, 10f);
-        AddButton("开始游戏", new Vector2(0f, -100f), new Vector2(300f, 62f), StartSingle, new Color(0.12f, 0.42f, 0.72f));
-        AddButton("返回", new Vector2(0f, -185f), new Vector2(180f, 48f), ShowModeSelect, new Color(0.25f, 0.28f, 0.34f));
+        AddText("怪物数量（1-20）", 22, new Vector2(-220f, 90f), new Vector2(230f, 40f), TextAnchor.MiddleLeft, Color.white);
+        monsterCountInput = AddIntegerInput(selectedMonsterCount.ToString(), new Vector2(105f, 90f), new Vector2(220f, 48f));
+        AddText("怪物血量（1-100）", 22, new Vector2(-220f, 10f), new Vector2(230f, 40f), TextAnchor.MiddleLeft, Color.white);
+        monsterHealthInput = AddIntegerInput(selectedMonsterHealth.ToString(), new Vector2(105f, 10f), new Vector2(220f, 48f));
+        settingsStatusText = AddText("请输入怪物数量和血量", 20, new Vector2(0f, -55f), new Vector2(620f, 34f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        AddButton("开始游戏", new Vector2(0f, -125f), new Vector2(300f, 62f), StartSingle, new Color(0.12f, 0.42f, 0.72f));
+        AddButton("返回", new Vector2(0f, -205f), new Vector2(180f, 48f), ShowModeSelect, new Color(0.25f, 0.28f, 0.34f));
     }
 
     private void ShowMultiplayer()
@@ -228,17 +242,22 @@ public class GameModeManager : MonoBehaviour
         Debug.Log("GameModeManager: 打开多人联机设置界面", this);
         canvas.enabled = true;
         ClearContent();
-        AddText("多人联机模式", 32, new Vector2(0f, 215f), new Vector2(680f, 52f), TextAnchor.MiddleCenter, Color.white);
-        AddText("连接 Python 游戏服务器", 21, new Vector2(0f, 170f), new Vector2(680f, 34f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
-        AddText("服务器地址", 21, new Vector2(-235f, 105f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
-        addressField = AddInput(defaultServerAddress, new Vector2(90f, 112f), new Vector2(300f, 48f));
-        AddText("服务器端口", 21, new Vector2(-235f, 40f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
-        portField = AddInput(defaultServerPort.ToString(), new Vector2(90f, 47f), new Vector2(300f, 48f));
-        AddText("玩家名称", 21, new Vector2(-235f, -25f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
-        nameField = AddInput("玩家", new Vector2(90f, -18f), new Vector2(300f, 48f));
-        statusText = AddText("请输入服务器信息", 18, new Vector2(0f, -85f), new Vector2(600f, 35f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
-        AddButton("连接服务器", new Vector2(0f, -145f), new Vector2(300f, 60f), ConnectToServer, new Color(0.18f, 0.58f, 0.42f));
-        AddButton("返回", new Vector2(0f, -220f), new Vector2(180f, 48f), ShowModeSelect, new Color(0.25f, 0.28f, 0.34f));
+        AddText("多人联机模式", 32, new Vector2(0f, 235f), new Vector2(680f, 52f), TextAnchor.MiddleCenter, Color.white);
+        AddText("连接服务器前设置怪物参数（房主设置生效）", 21, new Vector2(0f, 195f), new Vector2(680f, 34f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        AddText("服务器地址", 21, new Vector2(-235f, 135f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
+        addressField = AddInput(defaultServerAddress, new Vector2(90f, 142f), new Vector2(300f, 48f));
+        AddText("服务器端口", 21, new Vector2(-235f, 78f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
+        portField = AddIntegerInput(defaultServerPort.ToString(), new Vector2(90f, 85f), new Vector2(300f, 48f), 5);
+        AddText("玩家名称", 21, new Vector2(-235f, 21f), new Vector2(180f, 40f), TextAnchor.MiddleLeft, Color.white);
+        nameField = AddInput("玩家", new Vector2(90f, 28f), new Vector2(300f, 48f));
+        AddText("怪物数量（1-20）", 21, new Vector2(-235f, -38f), new Vector2(210f, 40f), TextAnchor.MiddleLeft, Color.white);
+        monsterCountInput = AddIntegerInput(selectedMonsterCount.ToString(), new Vector2(90f, -31f), new Vector2(300f, 48f));
+        AddText("怪物血量（1-100）", 21, new Vector2(-235f, -97f), new Vector2(210f, 40f), TextAnchor.MiddleLeft, Color.white);
+        monsterHealthInput = AddIntegerInput(selectedMonsterHealth.ToString(), new Vector2(90f, -90f), new Vector2(300f, 48f));
+        settingsStatusText = AddText("请输入服务器和怪物参数", 20, new Vector2(0f, -145f), new Vector2(650f, 32f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        statusText = settingsStatusText;
+        AddButton("连接服务器", new Vector2(0f, -195f), new Vector2(300f, 58f), ConnectToServer, new Color(0.18f, 0.58f, 0.42f));
+        AddButton("返回", new Vector2(0f, -255f), new Vector2(180f, 46f), ShowModeSelect, new Color(0.25f, 0.28f, 0.34f));
     }
 
     private void ShowLobby()
@@ -246,11 +265,15 @@ public class GameModeManager : MonoBehaviour
         state = ScreenState.Lobby;
         singleModeButton = null;
         multiplayerModeButton = null;
+        monsterCountInput = null;
+        monsterHealthInput = null;
         canvas.enabled = true;
         ClearContent();
         AddText("多人游戏大厅", 32, new Vector2(0f, 205f), new Vector2(680f, 52f), TextAnchor.MiddleCenter, Color.white);
         lobbyPlayersText = AddText("正在获取玩家列表…", 22, new Vector2(0f, 100f), new Vector2(600f, 150f), TextAnchor.UpperCenter, Color.white);
-        statusText = AddText("已连接，等待其他玩家", 19, new Vector2(0f, -45f), new Vector2(600f, 36f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        AddText("怪物数量：" + selectedMonsterCount + "    怪物血量：" + selectedMonsterHealth,
+            21, new Vector2(0f, -25f), new Vector2(650f, 36f), TextAnchor.MiddleCenter, Color.white);
+        statusText = AddText("已连接，等待其他玩家", 20, new Vector2(0f, -65f), new Vector2(600f, 36f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
         readyButton = AddButton("准备", new Vector2(-145f, -125f), new Vector2(240f, 60f), ToggleReady, new Color(0.18f, 0.58f, 0.42f));
         hostStartButton = AddButton("房主开始", new Vector2(145f, -125f), new Vector2(240f, 60f), StartAsHost, new Color(0.12f, 0.42f, 0.72f));
         AddButton("断开连接", new Vector2(0f, -205f), new Vector2(200f, 46f), DisconnectToMenu, new Color(0.25f, 0.28f, 0.34f));
@@ -265,17 +288,30 @@ public class GameModeManager : MonoBehaviour
             SetStatus("没有找到单人游戏管理器");
             return;
         }
+        int count;
+        int health;
+        if (!TryReadMonsterSettings(out count, out health))
+            return;
+        selectedMonsterCount = count;
+        selectedMonsterHealth = health;
         state = ScreenState.Gameplay;
         HideMenu();
-        monsterMode.StartSinglePlayer(Mathf.RoundToInt(monsterCountSlider.value), Mathf.RoundToInt(monsterHealthSlider.value));
+        monsterMode.StartSinglePlayer(count, health);
     }
 
     private void ConnectToServer()
     {
+        int count;
+        int health;
+        if (!TryReadMonsterSettings(out count, out health))
+            return;
+        selectedMonsterCount = count;
+        selectedMonsterHealth = health;
+
         int port;
         if (!int.TryParse(portField.text, out port) || port < 1 || port > 65535)
         {
-            SetStatus("端口必须是 1 到 65535 之间的数字");
+            SetSettingsMessage("端口必须是 1 到 65535 之间的整数");
             return;
         }
         if (networkClient != null)
@@ -292,7 +328,7 @@ public class GameModeManager : MonoBehaviour
     private void ToggleReady()
     {
         if (networkClient != null)
-            networkClient.SendReady();
+            networkClient.SendReady(selectedMonsterCount, selectedMonsterHealth);
         if (readyButton != null)
             readyButton.GetComponentInChildren<Text>().text = "已准备";
     }
@@ -300,7 +336,7 @@ public class GameModeManager : MonoBehaviour
     private void StartAsHost()
     {
         if (networkClient != null)
-            networkClient.SendStart();
+            networkClient.SendStart(selectedMonsterCount, selectedMonsterHealth);
     }
 
     private void UpdateLobby(string players)
@@ -309,14 +345,22 @@ public class GameModeManager : MonoBehaviour
             lobbyPlayersText.text = players;
     }
 
-    private void StartNetworkGame()
+    private void StartNetworkGame(int count, int health)
     {
+        // The server is authoritative.  Echo its clamped values into the local
+        // manager so any HUD/minimap can use the same round settings.
+        selectedMonsterCount = Mathf.Clamp(count, 1, 20);
+        selectedMonsterHealth = Mathf.Clamp(health, 1, 100);
         state = ScreenState.Gameplay;
         HideMenu();
         if (monsterMode == null)
             monsterMode = FindObjectOfType<MonsterModeManager>();
         if (monsterMode != null)
+        {
+            monsterMode.monsterCount = selectedMonsterCount;
+            monsterMode.monsterHealth = selectedMonsterHealth;
             monsterMode.StartNetworkMode();
+        }
     }
 
     private void DisconnectToMenu()
@@ -337,6 +381,9 @@ public class GameModeManager : MonoBehaviour
     private void ShowPauseMenu()
     {
         state = ScreenState.Pause;
+        // Discard the mouse delta that opened the menu. This prevents one
+        // frame of look input from rotating the background camera.
+        Input.ResetInputAxes();
         if (networkClient != null)
             networkClient.SetPaused(true);
         if (monsterMode == null)
@@ -353,10 +400,95 @@ public class GameModeManager : MonoBehaviour
             TextAnchor.MiddleCenter, Color.white);
         AddText("当前玩家动作已暂停", 21, new Vector2(0f, 65f), new Vector2(680f, 36f),
             TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
-        AddButton("继续游戏", new Vector2(0f, -20f), new Vector2(300f, 62f), ResumeGame,
+        AddButton("设置", new Vector2(0f, -20f), new Vector2(300f, 62f), ShowPauseSettings,
+            new Color(0.12f, 0.42f, 0.72f));
+        AddButton("继续游戏", new Vector2(0f, -95f), new Vector2(300f, 62f), ResumeGame,
             new Color(0.18f, 0.58f, 0.42f));
-        AddButton("退出游戏", new Vector2(0f, -105f), new Vector2(300f, 62f), ExitCurrentRoom,
+        AddButton("退出游戏", new Vector2(0f, -170f), new Vector2(300f, 62f), ExitCurrentRoom,
             new Color(0.65f, 0.20f, 0.18f));
+    }
+
+    private void ShowPauseSettings()
+    {
+        state = ScreenState.PauseSettings;
+        canvas.enabled = true;
+        ClearContent();
+        AddText("游戏设置", 38, new Vector2(0f, 150f), new Vector2(680f, 60f),
+            TextAnchor.MiddleCenter, Color.white);
+        AddText("鼠标水平灵敏度（0.1-30）", 22, new Vector2(-205f, 65f),
+            new Vector2(310f, 42f), TextAnchor.MiddleLeft, Color.white);
+        AddText("鼠标垂直灵敏度（0.1-30）", 22, new Vector2(-205f, 0f),
+            new Vector2(310f, 42f), TextAnchor.MiddleLeft, Color.white);
+
+        PlayerControl player = FindSettingsPlayer();
+        float x = player != null ? player.xScensitivity : PlayerPrefs.GetFloat("PlayerSensitivityX", 7f);
+        float y = player != null ? player.yScensitivity : PlayerPrefs.GetFloat("PlayerSensitivityY", 7f);
+        sensitivityXInput = AddDecimalInput(x.ToString("0.##"), new Vector2(145f, 65f), new Vector2(220f, 48f));
+        sensitivityYInput = AddDecimalInput(y.ToString("0.##"), new Vector2(145f, 0f), new Vector2(220f, 48f));
+        pauseSettingsStatus = AddText("调整后点击应用", 20, new Vector2(0f, -58f),
+            new Vector2(620f, 34f), TextAnchor.MiddleCenter, new Color(0.65f, 0.75f, 0.9f));
+        AddButton("应用", new Vector2(-105f, -125f), new Vector2(220f, 58f), ApplyPauseSettings,
+            new Color(0.18f, 0.58f, 0.42f));
+        AddButton("返回暂停菜单", new Vector2(130f, -125f), new Vector2(230f, 58f), ShowPauseMenu,
+            new Color(0.25f, 0.28f, 0.34f));
+    }
+
+    private PlayerControl FindSettingsPlayer()
+    {
+        PlayerControl[] players = FindObjectsOfType<PlayerControl>();
+        for (int i = 0; i < players.Length; i++)
+        {
+            if (players[i] != null && players[i].enabled && players[i].gameObject.activeInHierarchy)
+                return players[i];
+        }
+        return players.Length > 0 ? players[0] : null;
+    }
+
+    private void ApplyPauseSettings()
+    {
+        float x;
+        float y;
+        if (!TryReadSensitivity(out x, out y))
+            return;
+
+        PlayerPrefs.SetFloat("PlayerSensitivityX", x);
+        PlayerPrefs.SetFloat("PlayerSensitivityY", y);
+        PlayerPrefs.Save();
+        PlayerControl[] players = FindObjectsOfType<PlayerControl>();
+        for (int i = 0; i < players.Length; i++)
+        {
+            // PlayerControl is disabled while the pause overlay is open, but
+            // the setting must take effect immediately when gameplay resumes.
+            if (players[i] != null)
+            {
+                players[i].xScensitivity = x;
+                players[i].yScensitivity = y;
+            }
+        }
+        if (pauseSettingsStatus != null)
+        {
+            pauseSettingsStatus.text = "设置已应用";
+            pauseSettingsStatus.color = new Color(0.45f, 1f, 0.55f);
+        }
+    }
+
+    private bool TryReadSensitivity(out float x, out float y)
+    {
+        x = 7f;
+        y = 7f;
+        if (sensitivityXInput == null || sensitivityYInput == null)
+            return true;
+        if (!float.TryParse(sensitivityXInput.text.Trim(), out x) || x < 0.1f || x > 30f ||
+            !float.TryParse(sensitivityYInput.text.Trim(), out y) || y < 0.1f || y > 30f)
+        {
+            if (pauseSettingsStatus != null)
+            {
+                pauseSettingsStatus.text = "灵敏度必须是 0.1 到 30 之间的数字";
+                pauseSettingsStatus.color = new Color(1f, 0.72f, 0.35f);
+            }
+            return false;
+        }
+        return true;
     }
 
     private void ResumeGame()
@@ -486,28 +618,40 @@ public class GameModeManager : MonoBehaviour
         return button;
     }
 
-    private Slider AddSlider(Vector2 position, float min, float max, float value)
+    private bool TryReadMonsterSettings(out int count, out int health)
     {
-        GameObject go = new GameObject("Slider");
-        go.transform.SetParent(content.transform, false);
-        RectTransform rect = go.AddComponent<RectTransform>();
-        rect.anchoredPosition = position;
-        rect.sizeDelta = new Vector2(380f, 35f);
-        Slider slider = go.AddComponent<Slider>();
-        slider.minValue = min;
-        slider.maxValue = max;
-        slider.value = value;
-        Image background = go.AddComponent<Image>();
-        background.color = new Color(0.18f, 0.22f, 0.3f);
-        GameObject fill = new GameObject("Fill");
-        fill.transform.SetParent(go.transform, false);
-        Image fillImage = fill.AddComponent<Image>();
-        fillImage.color = new Color(0.25f, 0.65f, 0.95f);
-        RectTransform fillRect = fill.GetComponent<RectTransform>();
-        fillRect.anchorMin = new Vector2(0f, 0.25f);
-        fillRect.anchorMax = new Vector2(1f, 0.75f);
-        slider.fillRect = fillRect;
-        return slider;
+        count = selectedMonsterCount;
+        health = selectedMonsterHealth;
+
+        if (monsterCountInput == null || monsterHealthInput == null)
+            return true;
+
+        if (!int.TryParse(monsterCountInput.text.Trim(), out count) || count < 1 || count > 20)
+        {
+            SetSettingsMessage("怪物数量必须是 1 到 20 之间的整数");
+            return false;
+        }
+
+        if (!int.TryParse(monsterHealthInput.text.Trim(), out health) || health < 1 || health > 100)
+        {
+            SetSettingsMessage("怪物血量必须是 1 到 100 之间的整数");
+            return false;
+        }
+
+        return true;
+    }
+
+    private void SetSettingsMessage(string message)
+    {
+        if (settingsStatusText != null)
+        {
+            settingsStatusText.text = message;
+            settingsStatusText.color = new Color(1f, 0.72f, 0.35f);
+        }
+        else
+        {
+            SetStatus(message);
+        }
     }
 
     private InputField AddInput(string value, Vector2 position, Vector2 dimensions)
@@ -520,7 +664,9 @@ public class GameModeManager : MonoBehaviour
         Image image = go.AddComponent<Image>();
         image.color = new Color(0.12f, 0.15f, 0.21f);
         InputField input = go.AddComponent<InputField>();
-        input.text = value;
+        input.targetGraphic = image;
+        input.caretColor = Color.white;
+        input.selectionColor = new Color(0.25f, 0.55f, 0.9f, 0.65f);
         GameObject textObject = new GameObject("Text");
         textObject.transform.SetParent(go.transform, false);
         Text text = textObject.AddComponent<Text>();
@@ -529,12 +675,34 @@ public class GameModeManager : MonoBehaviour
         text.color = Color.white;
         text.raycastTarget = false;
         text.alignment = TextAnchor.MiddleLeft;
+        text.supportRichText = false;
         RectTransform textRect = text.GetComponent<RectTransform>();
         textRect.anchorMin = Vector2.zero;
         textRect.anchorMax = Vector2.one;
         textRect.offsetMin = new Vector2(14f, 0f);
         textRect.offsetMax = new Vector2(-14f, 0f);
         input.textComponent = text;
+        // Assign after wiring the text component so the initial value is
+        // rendered immediately, even before the first focus/update event.
+        input.text = value;
+        return input;
+    }
+
+    private InputField AddIntegerInput(string value, Vector2 position, Vector2 dimensions, int characterLimit = 3)
+    {
+        InputField input = AddInput(value, position, dimensions);
+        input.contentType = InputField.ContentType.IntegerNumber;
+        input.characterLimit = characterLimit;
+        input.lineType = InputField.LineType.SingleLine;
+        return input;
+    }
+
+    private InputField AddDecimalInput(string value, Vector2 position, Vector2 dimensions)
+    {
+        InputField input = AddInput(value, position, dimensions);
+        input.contentType = InputField.ContentType.DecimalNumber;
+        input.characterLimit = 5;
+        input.lineType = InputField.LineType.SingleLine;
         return input;
     }
 }

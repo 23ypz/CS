@@ -15,7 +15,25 @@ public class NetworkClient : MonoBehaviour
     public event Action<string> StatusChanged;
     public event Action<string> LobbyChanged;
     public event Action LobbyEntered;
-    public event Action GameStarted;
+    public event Action<int, int> GameStarted;
+    public event Action<NetScore[]> ScoresChanged;
+    /// <summary>Authoritative local player health and death state from snapshots.</summary>
+    public event Action<int, int, bool, float> PlayerHealthChanged;
+    /// <summary>Authoritative monster settings received from the lobby host.</summary>
+    public int MonsterCount { get; private set; } = 5;
+    public int MonsterHealth { get; private set; } = 10;
+    public int CurrentWave { get; private set; }
+    public int TotalWaves { get; private set; }
+    public int NextWave { get; private set; }
+    public bool WavesComplete { get; private set; }
+    public float WaveRemaining
+    {
+        get { return NextWave == 0 ? 0f : Mathf.Max(0f, waveRemainingAtSnapshot - (Time.unscaledTime - waveSnapshotTime)); }
+    }
+    private float waveRemainingAtSnapshot;
+    private float waveSnapshotTime;
+    public IEnumerable<NetworkPlayerView> RemotePlayers { get { return remotePlayers.Values; } }
+    public IEnumerable<NetworkPlayerView> RemoteMonsters { get { return remoteMonsters.Values; } }
 
     private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
     private readonly Dictionary<int, NetworkPlayerView> remotePlayers = new Dictionary<int, NetworkPlayerView>();
@@ -31,6 +49,8 @@ public class NetworkClient : MonoBehaviour
     private string sessionToken;
     private int localId = -1;
     private int inputSequence;
+    private int lastSnapshotTick = -1;
+    private int lastScoreTick = -1;
     private bool connected;
     private bool gameStarted;
     private bool mapReady;
@@ -108,7 +128,13 @@ public class NetworkClient : MonoBehaviour
         {
             shootTimer += Time.unscaledDeltaTime;
             WeaponControl weapon = localPlayer.GetComponent<WeaponControl>();
-            if (weapon != null && Input.GetMouseButton(0) && shootTimer >= weapon.bulletInterval)
+            PlayerControl playerController = localPlayer.GetComponent<PlayerControl>();
+            PlayerHealth playerHealth = localPlayer.GetComponent<PlayerHealth>();
+            bool weaponAllowed = playerController == null || !playerController.highSpeed;
+            bool alive = playerHealth == null || !playerHealth.IsDead;
+            bool ammoAvailable = weapon != null && weapon.CurrentMagazine > 0 && !weapon.IsBusy;
+            if (weapon != null && weaponAllowed && alive && ammoAvailable && Input.GetMouseButton(0) &&
+                shootTimer >= weapon.bulletInterval)
             {
                 shootTimer = 0f;
                 if (weapon.FirePoint != null)
@@ -143,8 +169,34 @@ public class NetworkClient : MonoBehaviour
         return true;
     }
 
-    public void SendReady() { SendTcp(JsonUtility.ToJson(new NetMessage { type = "ready" })); }
-    public void SendStart() { SendTcp(JsonUtility.ToJson(new NetMessage { type = "start" })); }
+    public void SendReady()
+    {
+        SendTcp(JsonUtility.ToJson(new NetMessage {
+            type = "ready", count = MonsterCount, health = MonsterHealth
+        }));
+    }
+
+    public void SendReady(int count, int health)
+    {
+        MonsterCount = Mathf.Clamp(count, 1, 20);
+        MonsterHealth = Mathf.Clamp(health, 1, 100);
+        SendTcp(JsonUtility.ToJson(new NetMessage {
+            type = "ready", count = MonsterCount, health = MonsterHealth
+        }));
+    }
+    public void SendStart(int count, int health)
+    {
+        MonsterCount = Mathf.Clamp(count, 1, 20);
+        MonsterHealth = Mathf.Clamp(health, 1, 100);
+        SendTcp(JsonUtility.ToJson(new NetMessage {
+            type = "start",
+            count = MonsterCount,
+            health = MonsterHealth
+        }));
+    }
+
+    // Keep older parameterless host-start call sites source-compatible.
+    public void SendStart() { SendStart(MonsterCount, MonsterHealth); }
     public void SendShoot(Vector3 origin, Vector3 direction)
     {
         SendTcp(JsonUtility.ToJson(new NetMessage { type = "shoot", x = origin.x, y = origin.y, z = origin.z, dx = direction.x, dy = direction.y, dz = direction.z }));
@@ -152,6 +204,9 @@ public class NetworkClient : MonoBehaviour
 
     public void Disconnect()
     {
+        CurrentWave = TotalWaves = NextWave = 0;
+        WavesComplete = false;
+        waveRemainingAtSnapshot = 0f;
         connected = false;
         gameStarted = false;
         mapReady = false;
@@ -159,6 +214,8 @@ public class NetworkClient : MonoBehaviour
         locallyPaused = false;
         predictionClock = 0f;
         predictedVelocity = 0f;
+        lastSnapshotTick = -1;
+        lastScoreTick = -1;
         RestoreNetworkBody();
         try { SendTcp(JsonUtility.ToJson(new NetMessage { type = "quit" })); } catch { }
         try { tcpStream?.Close(); } catch { }
@@ -191,7 +248,8 @@ public class NetworkClient : MonoBehaviour
             }
         }
         catch { }
-        if (connected) incoming.Enqueue(JsonUtility.ToJson(new NetMessage { type = "info", text = "TCP 连接已断开" }));
+        if (connected)
+            incoming.Enqueue(JsonUtility.ToJson(new NetMessage { type = "disconnect", text = "TCP 连接已断开" }));
     }
 
     private void ReadUdp()
@@ -228,12 +286,15 @@ public class NetworkClient : MonoBehaviour
                 break;
             case "map":
                 map = message.map;
-                mapReady = map != null && map.width > 0 && map.heights != null;
+                mapReady = IsValidMap(map);
                 StatusChanged?.Invoke(mapReady ? "地图同步完成，等待开始…" : "地图同步失败");
                 break;
             case "start":
                 gameStarted = true;
-                GameStarted?.Invoke();
+                ReadWaveState(message);
+                MonsterCount = Mathf.Clamp(message.count > 0 ? message.count : MonsterCount, 1, 20);
+                MonsterHealth = Mathf.Clamp(message.health > 0 ? message.health : MonsterHealth, 1, 100);
+                GameStarted?.Invoke(MonsterCount, MonsterHealth);
                 break;
             case "snapshot":
                 HandleSnapshot(message);
@@ -241,10 +302,15 @@ public class NetworkClient : MonoBehaviour
             case "info":
                 StatusChanged?.Invoke(message.text);
                 break;
+            case "disconnect":
+                StatusChanged?.Invoke(message.text);
+                Disconnect();
+                break;
             case "correction":
                 Reconcile(message);
                 break;
             case "event":
+                PublishScores(message.scores, message.tick, true);
                 StatusChanged?.Invoke(message.text);
                 break;
         }
@@ -252,17 +318,67 @@ public class NetworkClient : MonoBehaviour
 
     private void HandleSnapshot(NetMessage message)
     {
-        if (message.players == null) return;
+        // UDP can arrive out of order.  Ignoring stale snapshots prevents a
+        // killed monster from being recreated briefly (and exploding twice)
+        // and stops leaderboard scores from rolling backwards.
+        // Older compatible servers may omit the tick (deserializing as 0),
+        // so only apply ordering when a positive sequence is present.
+        if (message.tick > 0)
+        {
+            if (message.tick <= lastSnapshotTick)
+                return;
+            lastSnapshotTick = message.tick;
+        }
+
+        // Settings and scores are valid even when a partial snapshot omits an
+        // actor array.  Consume them before processing transforms.
+        if (message.count > 0)
+            MonsterCount = Mathf.Clamp(message.count, 1, 20);
+        if (message.health > 0)
+            MonsterHealth = Mathf.Clamp(message.health, 1, 100);
+        PublishScores(message.scores, message.tick);
+        ReadWaveState(message);
+        if (message.players == null)
+        {
+            HandleMonsterSnapshot(message.monsters);
+            return;
+        }
+        HashSet<int> presentPlayers = new HashSet<int>();
         for (int i = 0; i < message.players.Length; i++)
         {
             NetEntity entity = message.players[i];
             if (entity.id == localId)
             {
+                int maxHp = entity.maxHp > 0 ? entity.maxHp : 100;
+                PlayerHealth localHealth = localPlayer != null
+                    ? localPlayer.GetComponent<PlayerHealth>() : null;
+                bool wasDead = localHealth != null && localHealth.IsDead;
+                PlayerHealthChanged?.Invoke(entity.hp, maxHp, entity.dead,
+                    Mathf.Max(0f, entity.respawn));
+                if (localHealth != null)
+                    localHealth.ApplyAuthoritativeState(entity.hp, maxHp,
+                        entity.dead, Mathf.Max(0f, entity.respawn));
                 Vector3 serverPosition = new Vector3(entity.x, entity.y, entity.z);
+                // The server chooses the multiplayer respawn point. Override
+                // the local random visual position as soon as that snapshot
+                // arrives so prediction and the authoritative player agree.
+                if (!entity.dead && localPlayer != null &&
+                    (wasDead || (localHealth != null &&
+                     localHealth.CurrentHealth >= maxHp &&
+                     Vector3.Distance(localPlayer.position, serverPosition) > 2f)))
+                {
+                    localPlayer.position = serverPosition;
+                    Rigidbody localBody = localPlayer.GetComponent<Rigidbody>();
+                    if (localBody != null)
+                        localBody.position = serverPosition;
+                    predictedPosition = serverPosition;
+                    predictionInitialized = true;
+                }
                 float error = Vector3.Distance(predictedPosition, serverPosition);
                 ReconcilePosition(serverPosition, error);
                 continue;
             }
+            presentPlayers.Add(entity.id);
             NetworkPlayerView view;
             if (!remotePlayers.TryGetValue(entity.id, out view) || view == null)
             {
@@ -271,8 +387,64 @@ public class NetworkClient : MonoBehaviour
                 remotePlayers[entity.id] = view;
             }
             view.SetTarget(new Vector3(entity.x, entity.y, entity.z), Quaternion.Euler(0f, entity.yaw, 0f));
+            view.SetHealth(entity.hp, entity.maxHp, entity.dead, entity.respawn);
+        }
+        List<int> removedPlayers = new List<int>();
+        foreach (int id in remotePlayers.Keys)
+            if (!presentPlayers.Contains(id)) removedPlayers.Add(id);
+        for (int i = 0; i < removedPlayers.Count; i++)
+        {
+            NetworkPlayerView view = remotePlayers[removedPlayers[i]];
+            if (view != null) Destroy(view.gameObject);
+            remotePlayers.Remove(removedPlayers[i]);
         }
         HandleMonsterSnapshot(message.monsters);
+    }
+
+    private void ReadWaveState(NetMessage message)
+    {
+        // Older servers omit these optional fields. Also avoid rolling a wave
+        // back if its TCP start message arrives after a newer UDP snapshot.
+        if (message.totalWaves <= 0 || message.wave < CurrentWave)
+            return;
+        TotalWaves = message.totalWaves;
+        CurrentWave = Mathf.Clamp(message.wave, 0, TotalWaves);
+        NextWave = Mathf.Clamp(message.nextWave, 0, TotalWaves);
+        WavesComplete = message.wavesComplete;
+        waveRemainingAtSnapshot = Mathf.Max(0f, message.waveRemaining);
+        waveSnapshotTime = Time.unscaledTime;
+    }
+
+    private static bool IsValidMap(NetworkMapData value)
+    {
+        if (value == null || value.width <= 0 || value.depth <= 0 ||
+            value.cell <= 0f || float.IsNaN(value.cell) || float.IsInfinity(value.cell) ||
+            float.IsNaN(value.originX) || float.IsInfinity(value.originX) ||
+            float.IsNaN(value.originZ) || float.IsInfinity(value.originZ) ||
+            value.heights == null || value.walkable == null)
+            return false;
+
+        long cells = (long)value.width * value.depth;
+        // Reject malformed packets before NetworkMapData.Step can index arrays.
+        // The normal capture is 81x81; this upper bound prevents bogus
+        // dimensions from making the client accept an unusable map.
+        return cells <= 1024L * 1024L && value.heights.Length >= cells &&
+               value.walkable.Length >= cells;
+    }
+
+    private void PublishScores(NetScore[] scores, int serverTick, bool authoritativeEvent = false)
+    {
+        if (scores == null)
+            return;
+        // Kill events travel over TCP while snapshots use UDP.  Tagging both
+        // with the authoritative server tick prevents a delayed pre-kill UDP
+        // packet from rolling the leaderboard back after a TCP event.
+        if (serverTick > 0 && (serverTick < lastScoreTick ||
+            (serverTick == lastScoreTick && !authoritativeEvent)))
+            return;
+        if (serverTick > 0)
+            lastScoreTick = serverTick;
+        ScoresChanged?.Invoke(scores);
     }
 
     private void HandleMonsterSnapshot(NetEntity[] entities)
@@ -297,7 +469,16 @@ public class NetworkClient : MonoBehaviour
                     aiComponents[c].enabled = false;
                 EnemyControl[] healthComponents = monster.GetComponentsInChildren<EnemyControl>(true);
                 for (int c = 0; c < healthComponents.Length; c++)
-                    healthComponents[c].enabled = false;
+                {
+                    // Network health is server authoritative.  Leave the
+                    // component available for hitbox discovery, but make its
+                    // local HP effectively inexhaustible so BulletControl can
+                    // never destroy the proxy before the server confirms a
+                    // kill in the next snapshot.
+                    healthComponents[c].hp = int.MaxValue;
+                    healthComponents[c].bombEffect = null;
+                    healthComponents[c].SetNetworkControlled(true);
+                }
                 Rigidbody monsterBody = monster.GetComponent<Rigidbody>();
                 if (monsterBody != null)
                 {
@@ -317,7 +498,12 @@ public class NetworkClient : MonoBehaviour
         for (int i = 0; i < removed.Count; i++)
         {
             NetworkPlayerView view = remoteMonsters[removed[i]];
-            if (view != null) Destroy(view.gameObject);
+            if (view != null)
+            {
+                if (manager != null && manager.deathEffect != null)
+                    EnemyControl.SpawnDeathEffect(manager.deathEffect, view.transform);
+                Destroy(view.gameObject);
+            }
             remoteMonsters.Remove(removed[i]);
         }
     }

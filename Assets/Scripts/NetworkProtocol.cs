@@ -12,9 +12,19 @@ public class NetInput
 public class NetEntity
 {
     public int id, ack, hp, ammo;
+    public int maxHp;
     public string name;
     public float x, y, z, yaw, pitch, vy;
-    public bool ready, reloading;
+    public float respawn;
+    public bool ready, reloading, dead;
+}
+
+[Serializable]
+public class NetScore
+{
+    public int id;
+    public string name;
+    public int score;
 }
 
 [Serializable]
@@ -22,11 +32,15 @@ public class NetMessage
 {
     public string type, name, token, text;
     public int version = 1;
-    public int id, host, tick, count, health, shot;
+    public int id, host, tick, count, health, shot, score;
+    public int wave, totalWaves, nextWave;
+    public float waveRemaining;
+    public bool wavesComplete;
     public bool ready, success;
     public double time;
     public float x, y, z, dx, dy, dz;
     public NetInput[] inputs;
     public NetEntity[] players, monsters;
+    public NetScore[] scores;
     public NetworkMapData map;
 }

@@ -34,7 +34,7 @@ public class BulletControl : MonoBehaviour
         // Hitboxes can be child objects, so find health on the parent hierarchy.
         EnemyControl enemy = collision.collider.GetComponentInParent<EnemyControl>();
         if (enemy != null)
-            enemy.Gethit(2);
+            enemy.Gethit(2, transform.forward);
 
         if (effectPrefab != null && collision.contacts.Length > 0)
         {

@@ -30,14 +30,37 @@ public class PlayerControl : MonoBehaviour
         ani = GetComponentInChildren<Animator>();
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         yaw = rb.rotation.eulerAngles.y;
+        // Keep sensitivity between sessions when the pause-menu settings are
+        // applied. Existing prefab values remain the fallback for first run.
+        xScensitivity = PlayerPrefs.GetFloat("PlayerSensitivityX", xScensitivity);
+        yScensitivity = PlayerPrefs.GetFloat("PlayerSensitivityY", yScensitivity);
         Cursor.lockState = CursorLockMode.Locked;
+        // Health is attached at runtime so the existing Player prefab and its
+        // AudioSource remain unchanged.
+        if (GetComponent<PlayerHealth>() == null)
+            gameObject.AddComponent<PlayerHealth>();
     }
 
     // Update is called once per frame
     void Update()
     {
-        if (GameModeManager.IsGameplayPaused)
+        PlayerHealth health = GetComponent<PlayerHealth>();
+        if (health != null && health.IsDead)
+        {
+            moveInput = Vector2.zero;
+            jumpRequested = false;
             return;
+        }
+        // Check Escape before sampling mouse axes. GameModeManager processes
+        // the same key later in the frame; returning here prevents the click
+        // that opens a menu from rotating the background view.
+        if (GameModeManager.IsGameplayPaused || GameModeManager.IsMenuVisible ||
+            Input.GetKeyDown(KeyCode.Escape))
+        {
+            moveInput = Vector2.zero;
+            jumpRequested = false;
+            return;
+        }
         Aim();
         ReadLookInput();
         HighSpeed();
@@ -115,7 +138,14 @@ public class PlayerControl : MonoBehaviour
 
     private void FixedUpdate()
     {
-        if (GameModeManager.IsGameplayPaused)
+        PlayerHealth health = GetComponent<PlayerHealth>();
+        if (health != null && health.IsDead)
+        {
+            if (rb != null) rb.velocity = Vector3.zero;
+            jumpRequested = false;
+            return;
+        }
+        if (GameModeManager.IsGameplayPaused || GameModeManager.IsMenuVisible)
         {
             rb.velocity = Vector3.zero;
             jumpRequested = false;
@@ -152,6 +182,9 @@ public class PlayerControl : MonoBehaviour
 
     private void LateUpdate()
     {
+        PlayerHealth health = GetComponent<PlayerHealth>();
+        if (health != null && health.IsDead)
+            return;
         if (ani != null)
             ani.transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
     }
